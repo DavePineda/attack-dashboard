@@ -161,11 +161,6 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
                     return ip
         return request.client.host if request.client else "desconocido"
 
-    async def health(request: Request) -> Response:
-        ok = await store.ping()
-        return JSONResponse({"status": "ok" if ok else "degraded", "database": ok,
-                             "geoip": geo.enabled}, status_code=200 if ok else 503)
-
     async def read_body(request: Request) -> bytes:
         declared = request.headers.get("content-length")
         if declared and (not declared.isdigit() or int(declared) > MAX_BODY):
@@ -305,7 +300,6 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
             geo.close()
 
     routes = [
-        Route("/health", health, methods=["GET"]),
         Route("/api/v1/ingest", ingest, methods=["POST"]),
         Route("/api/v1/stats", stats, methods=["GET"]),
         Mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static"),

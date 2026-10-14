@@ -19,7 +19,8 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 settings = Settings.from_env()
-app = create_app(settings, PgStore(settings.database_url), CountryLookup(settings.geoip_db))
+app = create_app(settings, PgStore(settings.database_url, settings.pg_work_mem),
+                 CountryLookup(settings.geoip_db))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=settings.port, workers=1,

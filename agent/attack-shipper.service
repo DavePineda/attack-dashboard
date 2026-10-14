@@ -1,6 +1,6 @@
 [Unit]
 Description=Envía eventos de Fail2ban y UFW al dashboard de ataques
-Documentation=https://github.com/TU_USUARIO/attack-dashboard
+Documentation=https://github.com/DavePineda/attack-dashboard
 After=network-online.target
 Wants=network-online.target
 

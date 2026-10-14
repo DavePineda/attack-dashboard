@@ -24,12 +24,8 @@ flowchart LR
   subgraph Botkeep
     API[API Starlette] --> DB[(PostgreSQL)]
     API --> WEB[Dashboard estático]
-    KUMA[Uptime Kuma]
   end
-  A1 -. latido .-> KUMA
-  A2 -. latido .-> KUMA
   CF[Cloudflare] --> WEB
-  CF --> KUMA
 ```
 
 ## Decisiones de seguridad
@@ -43,7 +39,7 @@ flowchart LR
 | XSS / clickjacking en el dashboard | CSP `default-src 'none'` con solo `'self'`, sin `innerHTML` con datos, `X-Frame-Options: DENY`, `frame-ancestors 'none'`, sin CDNs. |
 | Exponer a terceros | Las IPs se publican agrupadas en **/24 (IPv4) y /48 (IPv6)**. La geolocalización es una base local: las IPs nunca salen del servidor. |
 | Agente comprometido en el VPS | Usuario de sistema sin shell, `ProtectSystem=strict`, sin capabilities, filtro de syscalls, `/var/log` de solo lectura, límites de memoria y CPU. |
-| Crecimiento de la base (2 GB de disco) | UFW se agrega por ventanas de 10 min y una tarea borra lo que supera `RETENTION_DAYS`. |
+| Crecimiento de la base (1,5 GB de disco para PostgreSQL) | UFW se agrega por ventanas de 10 min y una tarea borra lo que supera `RETENTION_DAYS` (30 días por defecto, el rango máximo del dashboard). |
 | Servidor sobrecargado | Caché de estadísticas de 60 s, una sola consulta pesada a la vez y límite de solicitudes públicas. |
 
 ## Estructura
@@ -59,27 +55,37 @@ app/
 agent/
   shipper.py      agente para los VPS (solo biblioteca estándar)
   attack-shipper.service / .timer, install.sh, shipper.env.example
-vps/              comprobaciones locales para monitores Push de Uptime Kuma
 tools/new_sensor.py   genera el token de un VPS y el SQL para registrarlo
-docs/uptime-kuma.md   guía de monitoreo
 tests/            pruebas del agente y de la API
 ```
 
 ## Despliegue en Botkeep
 
-Reparto sugerido del plan (2 GB RAM · 1,5 vCPU · 2 GB disco):
+Todo el plan (2 GB RAM · 1,5 vCPU · 2 GB disco) se reparte entre los dos servicios del
+dashboard, sin dejar nada libre:
 
 | Servicio | RAM | CPU | Disco |
 |---|---|---|---|
-| PostgreSQL | 512 MB | 0,4 | 900 MB |
-| API del dashboard | 384 MB | 0,4 | 300 MB |
-| Uptime Kuma | 384 MB | 0,3 | 400 MB |
-| *Libre para el siguiente proyecto* | 768 MB | 0,4 | 400 MB |
+| PostgreSQL | 1536 MB | 1,0 | 1536 MB |
+| API del dashboard | 512 MB | 0,5 | 512 MB |
+| **Total** | **2048 MB** | **1,5** | **2048 MB** |
+
+La API es un solo proceso Python que en la práctica usa 100–200 MB de RAM y no puede ocupar más
+de un núcleo; las consultas pesadas, la caché de datos y el almacenamiento están en PostgreSQL,
+así que ahí rinde cada recurso extra.
+
+Antes de empezar:
+
+- Botkeep revisa el fondo compartido al crear o cambiar recursos y no garantiza que una
+  asignación se pueda **aumentar** después. Crea **primero PostgreSQL** con su asignación exacta
+  y **luego la API** con el resto.
+- Los servicios detenidos también cuentan: si ya tienes otro servicio creado, elimínalo antes
+  para liberar sus recursos.
 
 ### 1. Base de datos
 
-**Create → Databases → PostgreSQL.** En la pestaña **Database** copia los datos de conexión y
-arma la URL, con TLS si el panel lo ofrece:
+**Create → Databases → PostgreSQL** con **1536 MB de RAM, 1,0 vCPU y 1536 MB de disco**. En la
+pestaña **Database** copia los datos de conexión y arma la URL, con TLS si el panel lo ofrece:
 
 ```
 postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE?sslmode=require
@@ -87,16 +93,20 @@ postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE?sslmode=require
 
 ### 2. API
 
-1. **Create → Applications → Python**, desde este repositorio de GitHub (o un ZIP).
+1. **Create → Applications → Python** con **512 MB de RAM, 0,5 vCPU y 512 MB de disco**,
+   desde el repositorio [DavePineda/attack-dashboard](https://github.com/DavePineda/attack-dashboard)
+   (o un ZIP).
 2. Comando de inicio: `python main.py`. Las dependencias están en `requirements.txt`.
 3. En **Environment** define (ver `.env.example`):
    - `DATABASE_URL` (secreto)
-   - `SOURCE_URL=https://github.com/TU_USUARIO/attack-dashboard`
-   - opcionales: `RETENTION_DAYS`, `PUBLIC_MASK_IPS`, `SITE_TITLE`, `GEOIP_DB`
-4. **Domains:** conecta `ataques.0r1sk.xyz` y crea el registro en Cloudflare.
+   - `SOURCE_URL=https://github.com/DavePineda/attack-dashboard`
+   - opcionales: `RETENTION_DAYS` (30 por defecto), `PG_WORK_MEM` (32MB por defecto),
+     `PUBLIC_MASK_IPS`, `SITE_TITLE`, `GEOIP_DB`
+4. **Domains:** conecta `dash.0r1sk.xyz` y crea el registro en Cloudflare.
    La app escucha en `0.0.0.0:$SERVER_PORT`, como pide Botkeep.
-5. Arranca y revisa **Console**: debe decir `Esquema aplicado` y `Dashboard listo`.
-   `https://ataques.0r1sk.xyz/health` debe responder `"database": true`.
+5. Arranca y revisa **Console**: debe decir `Esquema aplicado` y `Dashboard listo` (solo
+   aparecen si la API se conectó a PostgreSQL). Luego abre `https://dash.0r1sk.xyz`: el
+   dashboard debe cargar, aunque todavía no tenga eventos.
 
 Si el dominio pasa por el proxy de Cloudflare, define `CLIENT_IP_HEADER=cf-connecting-ip` para
 que el limitador vea la IP real del visitante. Hazlo **solo** en ese caso: si no, cualquiera
@@ -135,17 +145,12 @@ Requisitos: Python 3.9+, `ufw logging low` (o superior) y logs legibles por el g
 propias IPs y la red de la VPN. La primera ejecución empieza desde el final de los logs; usa
 `SHIPPER_BACKFILL=1` una sola vez si quieres enviar el historial existente.
 
-### 6. Uptime Kuma
-
-Ver [docs/uptime-kuma.md](docs/uptime-kuma.md).
-
 ## API
 
 | Método | Ruta | Descripción |
 |---|---|---|
 | `POST` | `/api/v1/ingest` | `Authorization: Bearer <token>`, cuerpo `{"events": [...]}`. Responde `accepted`, `inserted`, `duplicates`, `rejected`. |
 | `GET` | `/api/v1/stats?range=24h\|7d\|30d` | Resumen, serie temporal, países, puertos, jails y orígenes. |
-| `GET` | `/health` | Estado de la base y de GeoIP (para Uptime Kuma). |
 
 Evento:
 

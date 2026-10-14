@@ -107,7 +107,6 @@ SQL_PURGE = "DELETE FROM events WHERE ts < now() - make_interval(days => %(days)
 class Store(Protocol):
     async def open(self) -> None: ...
     async def close(self) -> None: ...
-    async def ping(self) -> bool: ...
     async def sensor_for_token(self, sha256: bytes) -> tuple[int, str] | None: ...
     async def insert_events(self, sensor_id: int, events: list[Event],
                             countries: list[str | None]) -> int: ...
@@ -124,11 +123,16 @@ def events_to_json(events: list[Event], countries: list[str | None]) -> str:
 
 
 class PgStore:
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, work_mem: str = "32MB") -> None:
         if not dsn:
             raise RuntimeError("Falta DATABASE_URL")
         self._dsn = dsn
+        self._work_mem = work_mem
         self._pool = None
+
+    async def _configure(self, conn) -> None:
+        # Solo para las sesiones de la API: no toca la configuración global de la base.
+        await conn.execute("SELECT set_config('work_mem', %s, false)", (self._work_mem,))
 
     async def open(self) -> None:
         from psycopg.rows import dict_row
@@ -137,6 +141,7 @@ class PgStore:
         self._pool = AsyncConnectionPool(
             self._dsn, min_size=1, max_size=4, open=False, timeout=10,
             kwargs={"autocommit": True, "row_factory": dict_row},
+            configure=self._configure,
         )
         for attempt in range(1, 11):
             try:
@@ -154,14 +159,6 @@ class PgStore:
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()
-
-    async def ping(self) -> bool:
-        try:
-            async with self._pool.connection(timeout=3) as conn:
-                await conn.execute("SELECT 1")
-            return True
-        except Exception:
-            return False
 
     async def sensor_for_token(self, sha256: bytes) -> tuple[int, str] | None:
         async with self._pool.connection() as conn:

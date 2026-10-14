@@ -18,7 +18,6 @@ import os
 import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -52,7 +51,6 @@ class Config:
     ufw_log: str = "/var/log/ufw.log"
     bucket_seconds: int = 600
     state_dir: Path = Path("/var/lib/attack-shipper")
-    kuma_push_url: str = ""
     max_batch: int = 1000
     timeout: int = 20
     ignore_nets: list = field(default_factory=list)
@@ -78,7 +76,6 @@ class Config:
             ufw_log=env.get("SHIPPER_UFW_LOG", cls.ufw_log).strip(),
             bucket_seconds=bucket,
             state_dir=Path(state.split(":")[0]),
-            kuma_push_url=env.get("SHIPPER_KUMA_PUSH_URL", "").strip(),
             max_batch=min(int(env.get("SHIPPER_MAX_BATCH", "1000")), 2000),
             timeout=int(env.get("SHIPPER_TIMEOUT", "20")),
             ignore_nets=nets,
@@ -229,19 +226,6 @@ def post_json(cfg: Config, payload: dict) -> dict:
         return json.loads(resp.read() or b"{}")
 
 
-def kuma_push(cfg: Config, message: str) -> None:
-    if not cfg.kuma_push_url:
-        return
-    parts = urllib.parse.urlsplit(cfg.kuma_push_url)
-    query = urllib.parse.urlencode({"status": "up", "msg": message[:100], "ping": ""})
-    url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
-    try:
-        urllib.request.urlopen(urllib.request.Request(
-            url, headers={"User-Agent": f"attack-shipper/{VERSION}"}), timeout=10).read()
-    except (urllib.error.URLError, OSError) as exc:
-        log.warning("No se pudo notificar a Uptime Kuma: %s", exc)
-
-
 def collect(cfg: Config, state: dict, now: datetime):
     """Devuelve (eventos, nuevo_estado)."""
     events: list[dict] = []
@@ -302,7 +286,7 @@ def run(cfg: Config, now: datetime | None = None, sender=post_json) -> int:
 
     totals = {"accepted": 0, "inserted": 0, "rejected": 0}
     # Siempre al menos un envío (aunque vacío): valida el token y actualiza last_seen,
-    # así el latido a Uptime Kuma solo llega si la API realmente acepta al agente.
+    # así el dashboard sabe que el agente sigue vivo aunque no haya ataques nuevos.
     for i in range(0, max(len(events), 1), cfg.max_batch):
         try:
             result = sender(cfg, {"events": events[i:i + cfg.max_batch]})
@@ -316,10 +300,8 @@ def run(cfg: Config, now: datetime | None = None, sender=post_json) -> int:
             totals[key] += int(result.get(key, 0))
 
     save_state(state_file, new_state)
-    msg = (f"{len(events)} eventos, {totals['inserted']} nuevos, "
-           f"{totals['rejected']} rechazados")
-    log.info(msg)
-    kuma_push(cfg, msg)
+    log.info("%d eventos, %d nuevos, %d rechazados",
+             len(events), totals["inserted"], totals["rejected"])
     return 0
 
 

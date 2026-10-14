@@ -44,6 +44,13 @@ def _int(name: str, default: int, lo: int, hi: int) -> int:
     return number
 
 
+def _pg_size(name: str, default: str) -> str:
+    value = os.environ.get(name, "").strip() or default
+    if not re.fullmatch(r"\d{1,6}(kB|MB|GB)", value):
+        raise ValueError(f"{name} debe ser un tamaño como 32MB (unidades: kB, MB, GB)")
+    return value
+
+
 def _https_url(value: str) -> str:
     value = value.strip()
     return value if re.fullmatch(r"https://[^\s\"'<>]{1,300}", value) else ""
@@ -52,6 +59,9 @@ def _https_url(value: str) -> str:
 @dataclass(frozen=True)
 class Settings:
     database_url: str
+    # PG_WORK_MEM: memoria por ordenamiento en las conexiones de la API (las estadísticas
+    # de 30 días agrupan y ordenan mucho; con el valor por defecto de 4MB irían a disco).
+    pg_work_mem: str
     port: int
     mask_ips: bool
     retention_days: int
@@ -72,9 +82,10 @@ class Settings:
         port = os.environ.get("SERVER_PORT") or os.environ.get("PORT") or "8000"
         return cls(
             database_url=os.environ.get("DATABASE_URL", "").strip(),
+            pg_work_mem=_pg_size("PG_WORK_MEM", "32MB"),
             port=int(port),
             mask_ips=_bool("PUBLIC_MASK_IPS", True),
-            retention_days=_int("RETENTION_DAYS", 60, 1, 3650),
+            retention_days=_int("RETENTION_DAYS", 30, 1, 3650),
             geoip_db=os.environ.get("GEOIP_DB", "").strip(),
             trust_proxy=_bool("TRUST_PROXY", True),
             client_ip_header=os.environ.get("CLIENT_IP_HEADER", "").strip().lower(),

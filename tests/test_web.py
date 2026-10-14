@@ -31,7 +31,6 @@ class FakeStore:
 
     async def open(self): ...
     async def close(self): ...
-    async def ping(self): return True
     async def purge(self, days): return 0
 
     async def sensor_for_token(self, sha):
