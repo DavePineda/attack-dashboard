@@ -85,11 +85,18 @@ Antes de empezar:
 ### 1. Base de datos
 
 **Create → Databases → PostgreSQL** con **1536 MB de RAM, 1,0 vCPU y 1536 MB de disco**. En la
-pestaña **Database** copia los datos de conexión y arma la URL, con TLS si el panel lo ofrece:
+pestaña **Database** copia los datos de conexión y arma la URL. Botkeep exige TLS con
+verificación del certificado: el CA del panel (**CA certificate**) está en
+`certs/botkeep-ca.pem` y la API lo usa con `sslmode=verify-full`, que comprueba el certificado y
+la IP del servidor:
 
 ```
-postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE?sslmode=require
+postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE?sslmode=verify-full&sslrootcert=/home/container/certs/botkeep-ca.pem
 ```
+
+Si la clave tiene caracteres especiales (`@ : / ? # % & +` o espacios), codifícalos en la URL
+(por ejemplo `@` → `%40`). Nunca uses `sslmode=require` ni `disable` para "arreglar" un error
+de conexión: se perdería la protección contra suplantación del servidor.
 
 ### 2. API
 
