@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ataques a 0r1sk.xyz</title>
+  <meta name="description" content="Telemetría en vivo de los ataques que bloquean Fail2ban y UFW en mis servidores.">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Saltar al contenido</a>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div class="brand">
+        <span class="pulse" aria-hidden="true"></span>
+        <div>
+          <h1 id="title">Ataques a 0r1sk.xyz</h1>
+          <p class="sub">Lo que Fail2ban y UFW bloquean en mis servidores, en vivo.</p>
+        </div>
+      </div>
+      <div class="controls">
+        <div class="seg" role="radiogroup" aria-label="Rango de tiempo">
+          <button type="button" role="radio" data-range="24h" aria-checked="false">24 h</button>
+          <button type="button" role="radio" data-range="7d" aria-checked="true">7 días</button>
+          <button type="button" role="radio" data-range="30d" aria-checked="false">30 días</button>
+        </div>
+        <p class="status" id="status" aria-live="polite">Cargando…</p>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="kpis" aria-label="Resumen">
+      <article class="kpi">
+        <h2>Baneos</h2>
+        <p class="kpi-value" id="k-bans">—</p>
+        <p class="kpi-note">IPs bloqueadas por Fail2ban</p>
+      </article>
+      <article class="kpi">
+        <h2>Paquetes bloqueados</h2>
+        <p class="kpi-value" id="k-blocked">—</p>
+        <p class="kpi-note">Descartados por el firewall (UFW)</p>
+      </article>
+      <article class="kpi">
+        <h2>IPs únicas</h2>
+        <p class="kpi-value" id="k-ips">—</p>
+        <p class="kpi-note">Orígenes distintos</p>
+      </article>
+      <article class="kpi">
+        <h2>Países</h2>
+        <p class="kpi-value" id="k-countries">—</p>
+        <p class="kpi-note" id="k-countries-note">Según la IP de origen</p>
+      </article>
+    </section>
+
+    <section class="grid two">
+      <article class="card">
+        <header class="card-head">
+          <h2><span class="key" data-series="1" aria-hidden="true"></span>Baneos de Fail2ban</h2>
+          <p class="card-sub" id="t-f2b-sub"></p>
+        </header>
+        <div class="chart" id="chart-f2b" role="img" aria-label="Baneos de Fail2ban por periodo"></div>
+        <details class="as-table"><summary>Ver como tabla</summary><div id="table-f2b"></div></details>
+      </article>
+      <article class="card">
+        <header class="card-head">
+          <h2><span class="key" data-series="2" aria-hidden="true"></span>Bloqueos de UFW</h2>
+          <p class="card-sub" id="t-ufw-sub"></p>
+        </header>
+        <div class="chart" id="chart-ufw" role="img" aria-label="Paquetes bloqueados por UFW por periodo"></div>
+        <details class="as-table"><summary>Ver como tabla</summary><div id="table-ufw"></div></details>
+      </article>
+    </section>
+
+    <section class="grid three">
+      <article class="card">
+        <header class="card-head"><h2>Países de origen</h2><p class="card-sub">IPs únicas</p></header>
+        <ol class="bars" id="countries"></ol>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Puertos más atacados</h2><p class="card-sub">Paquetes bloqueados por UFW</p></header>
+        <ol class="bars" id="ports"></ol>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Servicios atacados</h2><p class="card-sub">Baneos por jail de Fail2ban</p></header>
+        <ol class="bars" id="jails"></ol>
+      </article>
+    </section>
+
+    <section class="card">
+      <header class="card-head">
+        <h2>Orígenes más insistentes</h2>
+        <p class="card-sub" id="top-sub"></p>
+      </header>
+      <div class="table-wrap">
+        <table class="data">
+          <thead>
+            <tr>
+              <th scope="col">Origen</th>
+              <th scope="col">País</th>
+              <th scope="col" class="num">Baneos</th>
+              <th scope="col" class="num">Paquetes</th>
+              <th scope="col" class="num">Hosts</th>
+              <th scope="col">Visto por última vez</th>
+            </tr>
+          </thead>
+          <tbody id="top"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <p>
+      Un agente en cada VPS lee <code>fail2ban.log</code> y <code>ufw.log</code> y envía los eventos por HTTPS
+      a una API en Python con PostgreSQL. Las IPs se agrupan por red para no publicar hosts concretos.
+      Los datos se conservan <span id="retention">60</span> días.
+    </p>
+    <p id="geo-attrib" hidden></p>
+    <p><a href="https://github.com/TU_USUARIO/attack-dashboard" rel="noopener">Código fuente</a></p>
+  </footer>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

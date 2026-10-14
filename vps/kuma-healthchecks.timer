@@ -1,0 +1,10 @@
+[Unit]
+Description=Comprobaciones locales para Uptime Kuma cada minuto
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

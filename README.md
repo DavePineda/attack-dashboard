@@ -1,0 +1,171 @@
+# Dashboard de ataques · 0r1sk.xyz
+
+Telemetría en vivo de lo que **Fail2ban** y **UFW** bloquean en mis servidores: baneos por
+servicio, puertos escaneados, países de origen y las redes más insistentes.
+
+Un agente sin dependencias en cada VPS lee los logs y los envía por HTTPS a una API en Python
+con PostgreSQL, alojada en Botkeep. El dashboard es una página estática sin librerías de
+terceros, servida con una CSP estricta.
+
+![Dashboard con datos de ejemplo](docs/captura.png)
+
+```mermaid
+flowchart LR
+  subgraph VPS1[VPS correo · InterServer]
+    F1[fail2ban.log] --> A1[attack-shipper]
+    U1[ufw.log] --> A1
+  end
+  subgraph VPS2[VPS VPN · OCI]
+    F2[fail2ban.log] --> A2[attack-shipper]
+    U2[ufw.log] --> A2
+  end
+  A1 -- HTTPS + token --> API
+  A2 -- HTTPS + token --> API
+  subgraph Botkeep
+    API[API Starlette] --> DB[(PostgreSQL)]
+    API --> WEB[Dashboard estático]
+    KUMA[Uptime Kuma]
+  end
+  A1 -. latido .-> KUMA
+  A2 -. latido .-> KUMA
+  CF[Cloudflare] --> WEB
+  CF --> KUMA
+```
+
+## Decisiones de seguridad
+
+| Riesgo | Mitigación |
+|---|---|
+| Token del agente robado de la base | Solo se guarda su **SHA-256**; el token en claro vive únicamente en el VPS (`0640 root:attack-shipper`). Un token por servidor, revocable con un `UPDATE`. |
+| Fuerza bruta contra la ingesta | Tokens de 256 bits, limitador por IP y bloqueo progresivo tras 10 intentos fallidos. |
+| Datos maliciosos en el lote | Validación estricta (tipos, rangos, regex), solo IPs públicas, máximo 2000 eventos y 1 MiB por lote; además `CHECK` en la base. Consultas siempre parametrizadas. |
+| Reenvíos y conteos duplicados | Índice único de deduplicación + `ON CONFLICT DO NOTHING`. El agente solo envía ventanas de UFW **cerradas**, así un reintento nunca produce conteos parciales. |
+| XSS / clickjacking en el dashboard | CSP `default-src 'none'` con solo `'self'`, sin `innerHTML` con datos, `X-Frame-Options: DENY`, `frame-ancestors 'none'`, sin CDNs. |
+| Exponer a terceros | Las IPs se publican agrupadas en **/24 (IPv4) y /48 (IPv6)**. La geolocalización es una base local: las IPs nunca salen del servidor. |
+| Agente comprometido en el VPS | Usuario de sistema sin shell, `ProtectSystem=strict`, sin capabilities, filtro de syscalls, `/var/log` de solo lectura, límites de memoria y CPU. |
+| Crecimiento de la base (2 GB de disco) | UFW se agrega por ventanas de 10 min y una tarea borra lo que supera `RETENTION_DAYS`. |
+| Servidor sobrecargado | Caché de estadísticas de 60 s, una sola consulta pesada a la vez y límite de solicitudes públicas. |
+
+## Estructura
+
+```
+app/
+  web.py          API (ingesta + estadísticas), cabeceras de seguridad, limitador
+  ingest.py       validación de lotes (funciones puras)
+  store.py        PostgreSQL con psycopg 3; todo el SQL está aquí
+  schema.sql      tablas, restricciones e índices (se aplica al arrancar)
+  geo.py          país por IP con una base .mmdb local (opcional)
+  static/         dashboard: HTML + CSS + JS sin dependencias, gráficos SVG propios
+agent/
+  shipper.py      agente para los VPS (solo biblioteca estándar)
+  attack-shipper.service / .timer, install.sh, shipper.env.example
+vps/              comprobaciones locales para monitores Push de Uptime Kuma
+tools/new_sensor.py   genera el token de un VPS y el SQL para registrarlo
+docs/uptime-kuma.md   guía de monitoreo
+tests/            pruebas del agente y de la API
+```
+
+## Despliegue en Botkeep
+
+Reparto sugerido del plan (2 GB RAM · 1,5 vCPU · 2 GB disco):
+
+| Servicio | RAM | CPU | Disco |
+|---|---|---|---|
+| PostgreSQL | 512 MB | 0,4 | 900 MB |
+| API del dashboard | 384 MB | 0,4 | 300 MB |
+| Uptime Kuma | 384 MB | 0,3 | 400 MB |
+| *Libre para el siguiente proyecto* | 768 MB | 0,4 | 400 MB |
+
+### 1. Base de datos
+
+**Create → Databases → PostgreSQL.** En la pestaña **Database** copia los datos de conexión y
+arma la URL, con TLS si el panel lo ofrece:
+
+```
+postgresql://USUARIO:CLAVE@HOST:PUERTO/BASE?sslmode=require
+```
+
+### 2. API
+
+1. **Create → Applications → Python**, desde este repositorio de GitHub (o un ZIP).
+2. Comando de inicio: `python main.py`. Las dependencias están en `requirements.txt`.
+3. En **Environment** define (ver `.env.example`):
+   - `DATABASE_URL` (secreto)
+   - `SOURCE_URL=https://github.com/TU_USUARIO/attack-dashboard`
+   - opcionales: `RETENTION_DAYS`, `PUBLIC_MASK_IPS`, `SITE_TITLE`, `GEOIP_DB`
+4. **Domains:** conecta `ataques.0r1sk.xyz` y crea el registro en Cloudflare.
+   La app escucha en `0.0.0.0:$SERVER_PORT`, como pide Botkeep.
+5. Arranca y revisa **Console**: debe decir `Esquema aplicado` y `Dashboard listo`.
+   `https://ataques.0r1sk.xyz/health` debe responder `"database": true`.
+
+Si el dominio pasa por el proxy de Cloudflare, define `CLIENT_IP_HEADER=cf-connecting-ip` para
+que el limitador vea la IP real del visitante. Hazlo **solo** en ese caso: si no, cualquiera
+podría falsificar esa cabecera.
+
+### 3. Geolocalización (opcional)
+
+Descarga **DB-IP IP to Country Lite** en formato MMDB (licencia CC BY 4.0, gratuita, sin
+registro), súbela a la app como `data/country.mmdb` y define `GEOIP_DB=data/country.mmdb`.
+El pie del dashboard muestra la atribución que exige la licencia. MaxMind GeoLite2-Country
+también funciona; en ese caso ajusta `GEOIP_ATTRIBUTION`.
+
+### 4. Registrar cada VPS
+
+En tu equipo:
+
+```bash
+python3 tools/new_sensor.py vps-correo
+```
+
+Ejecuta el `INSERT` que imprime en la pestaña **Data** de PostgreSQL y guarda el token.
+
+### 5. Instalar el agente en el VPS
+
+```bash
+scp -r agent/ usuario@vps:/tmp/attack-shipper
+ssh usuario@vps
+sudo /tmp/attack-shipper/install.sh
+sudo nano /etc/attack-shipper/shipper.env    # SHIPPER_ENDPOINT, SHIPPER_TOKEN, SHIPPER_IGNORE_NETS
+sudo systemctl enable --now attack-shipper.timer
+sudo systemctl start attack-shipper && journalctl -u attack-shipper -n 20
+```
+
+Requisitos: Python 3.9+, `ufw logging low` (o superior) y logs legibles por el grupo `adm`
+(lo normal en Debian/Ubuntu; el instalador lo comprueba). En `SHIPPER_IGNORE_NETS` pon tus
+propias IPs y la red de la VPN. La primera ejecución empieza desde el final de los logs; usa
+`SHIPPER_BACKFILL=1` una sola vez si quieres enviar el historial existente.
+
+### 6. Uptime Kuma
+
+Ver [docs/uptime-kuma.md](docs/uptime-kuma.md).
+
+## API
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/api/v1/ingest` | `Authorization: Bearer <token>`, cuerpo `{"events": [...]}`. Responde `accepted`, `inserted`, `duplicates`, `rejected`. |
+| `GET` | `/api/v1/stats?range=24h\|7d\|30d` | Resumen, serie temporal, países, puertos, jails y orígenes. |
+| `GET` | `/health` | Estado de la base y de GeoIP (para Uptime Kuma). |
+
+Evento:
+
+```json
+{"ts": "2026-10-14T15:23:45Z", "source": "fail2ban", "jail": "sshd", "ip": "203.0.113.7"}
+{"ts": "2026-10-14T15:20:00Z", "source": "ufw", "ip": "203.0.113.7", "proto": "TCP", "dport": 23, "hits": 14}
+```
+
+## Pruebas
+
+```bash
+python3 -m unittest discover tests -v
+```
+
+`test_shipper.py` usa solo la biblioteca estándar (parsers, agregación, ventanas cerradas,
+reintentos, rotación de logs). `test_web.py` levanta la API con un almacén falso y prueba
+autenticación, validación, deduplicación, límites, cabeceras y bloqueo por intentos fallidos.
+
+## Ideas para seguir
+
+- Reportar automáticamente las IPs más agresivas a AbuseIPDB.
+- Correlacionar con el catálogo KEV de CISA para alertar sobre CVEs de los servicios atacados.
+- Exportar los eventos en formato STIX/CSV para practicar análisis en un SIEM.
