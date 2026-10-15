@@ -103,6 +103,26 @@ SELECT count(*) FILTER (WHERE enabled) AS count, max(last_seen) AS last_seen FRO
 
 SQL_PURGE = "DELETE FROM events WHERE ts < now() - make_interval(days => %(days)s)"
 
+# Si la red entre el nodo de la API y el de la base se corta, una conexión muerta solo se
+# detecta con los temporizadores TCP del sistema (pueden ser horas) y la consulta que la usa
+# se queda colgada. Con esto falla en menos de un minuto. DATABASE_URL tiene prioridad.
+TCP_DEFAULTS = {
+    "connect_timeout": 10,       # s para abrir una conexión
+    "keepalives": 1,             # sondear las conexiones sin tráfico...
+    "keepalives_idle": 30,       # ...tras 30 s de inactividad,
+    "keepalives_interval": 10,   # cada 10 s,
+    "keepalives_count": 3,       # y darla por muerta tras 3 sondeos sin respuesta
+    "tcp_user_timeout": 30_000,  # ms con datos enviados sin confirmar antes de cortarla
+}
+
+
+def tcp_options(dsn: str) -> dict[str, int]:
+    """Las opciones de TCP_DEFAULTS que DATABASE_URL no fija ya."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    given = conninfo_to_dict(dsn)
+    return {k: v for k, v in TCP_DEFAULTS.items() if k not in given}
+
 
 class Store(Protocol):
     async def open(self) -> None: ...
@@ -138,13 +158,17 @@ class PgStore:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
 
+        tcp = tcp_options(self._dsn)
         for attempt in range(1, 11):
             # Un pool que no logró abrir queda cerrado y no se puede reutilizar:
             # cada intento necesita uno nuevo.
             pool = AsyncConnectionPool(
                 self._dsn, min_size=1, max_size=4, open=False, timeout=10,
-                kwargs={"autocommit": True, "row_factory": dict_row},
+                kwargs={"autocommit": True, "row_factory": dict_row, **tcp},
                 configure=self._configure,
+                # Prueba cada conexión al sacarla del pool: si está rota, la descarta y
+                # entrega otra en vez de dejar que falle la consulta.
+                check=AsyncConnectionPool.check_connection,
             )
             try:
                 await pool.open(wait=True, timeout=10)

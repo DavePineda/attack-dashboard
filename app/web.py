@@ -26,6 +26,7 @@ from .store import Store
 log = logging.getLogger("web")
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY = 1_048_576  # 1 MiB por lote
+STATS_TIMEOUT = 20  # s máximos para calcular las estadísticas; si se pasa, se cancela
 RANGES = {"24h": (timedelta(hours=24), "hour"),
           "7d": (timedelta(days=7), "day"),
           "30d": (timedelta(days=30), "day")}
@@ -170,7 +171,8 @@ def build_timeline(rows: list[dict], *, since: datetime, now: datetime, unit: st
 
 
 def create_app(settings: Settings, store: Store, geo: CountryLookup | None = None,
-               *, run_background: bool = True) -> Starlette:
+               *, run_background: bool = True,
+               stats_timeout: float = STATS_TIMEOUT) -> Starlette:
     geo = geo or CountryLookup("")
     stats_limiter = TokenBucket(rate=0.5, burst=30)      # ~30 req/min por IP
     ingest_limiter = TokenBucket(rate=2.0, burst=60)
@@ -265,7 +267,16 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
             cached = stats_cache.get(key)
             if cached and cached[0] > time.monotonic():
                 return JSONResponse(cached[1])
-            payload = await compute_stats(key)
+            try:
+                # Una consulta colgada no puede quedarse con el turno: se cancela y lo libera
+                # para la siguiente petición, que lo intenta con otra conexión.
+                async with asyncio.timeout(stats_timeout):
+                    payload = await compute_stats(key)
+            except TimeoutError:
+                log.warning("Estadísticas (%s) canceladas: la base no respondió en %g s",
+                            key, stats_timeout)
+                return error(503, "La base de datos no respondió a tiempo",
+                             **{"Retry-After": "10"})
             stats_cache[key] = (time.monotonic() + settings.stats_cache_seconds, payload)
         return JSONResponse(payload)
 

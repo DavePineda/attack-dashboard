@@ -2,6 +2,7 @@
 
 Requiere starlette y uvicorn: python3 -m unittest discover tests
 """
+import asyncio
 import hashlib
 import json
 import os
@@ -164,6 +165,47 @@ class WebTests(unittest.TestCase):
         # Otra IP no se ve afectada, y un token válido desde la IP bloqueada también espera.
         self.assertEqual(self.req("/api/v1/ingest", {"events": []}, xff="203.0.113.51")[0], 200)
         self.assertEqual(self.req("/api/v1/ingest", {"events": []}, xff="1.1.1.1, 203.0.113.50")[0], 429)
+
+
+class HangingStore(FakeStore):
+    """La primera consulta de estadísticas no responde nunca, como con una conexión muerta."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    async def stats(self, **kw):
+        self.calls += 1
+        if self.calls == 1:
+            await asyncio.sleep(3600)
+        return await super().stats(**kw)
+
+
+class StatsTimeoutTests(unittest.TestCase):
+    def test_hung_query_releases_the_turn(self):
+        os.environ.update({"DATABASE_URL": "x", "STATS_CACHE_SECONDS": "0"})
+        app = create_app(Settings.from_env(), HangingStore(), run_background=False,
+                         stats_timeout=0.5)
+        server, port = start_server(app)
+        self.addCleanup(setattr, server, "should_exit", True)
+        url = f"http://127.0.0.1:{port}/api/v1/stats?range=24h"
+        results = {}
+
+        def get(name):
+            try:
+                with urllib.request.urlopen(url, timeout=10) as resp:
+                    results[name] = (resp.status, None)
+            except urllib.error.HTTPError as exc:
+                results[name] = (exc.code, exc.headers["retry-after"])
+
+        start = time.monotonic()
+        hung = threading.Thread(target=get, args=("colgada",))
+        hung.start()
+        time.sleep(0.2)  # la segunda llega mientras la primera tiene el turno
+        get("en_cola")
+        hung.join()
+        self.assertEqual(results, {"colgada": (503, "10"), "en_cola": (200, None)})
+        self.assertLess(time.monotonic() - start, 5)
 
 
 class ProxyOnlyTests(unittest.TestCase):

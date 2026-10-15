@@ -99,6 +99,13 @@ Si la clave tiene caracteres especiales (`@ : / ? # % & +` o espacios), codifíc
 (por ejemplo `@` → `%40`). Nunca uses `sslmode=require` ni `disable` para "arreglar" un error
 de conexión: se perdería la protección contra suplantación del servidor.
 
+La API no necesita nada más en la URL para sobrevivir a un corte de red entre nodos: añade por
+su cuenta `connect_timeout=10`, keepalives (sondeo cada 10 s tras 30 s sin tráfico, 3 fallos) y
+`tcp_user_timeout=30000`, comprueba cada conexión antes de usarla y cancela las estadísticas
+que tarden más de 20 s (el dashboard muestra un error y reintenta al minuto). Así una conexión muerta
+falla en menos de un minuto en vez de colgar el dashboard hasta reiniciar. Si pones alguna de
+esas opciones en la URL, manda la tuya.
+
 ### 2. API
 
 1. **Create → Applications → Python** con **512 MB de RAM, 0,5 vCPU y 512 MB de disco**,
@@ -197,7 +204,9 @@ python3 -m unittest discover tests -v
 
 `test_shipper.py` usa solo la biblioteca estándar (parsers, agregación, ventanas cerradas,
 reintentos, rotación de logs). `test_web.py` levanta la API con un almacén falso y prueba
-autenticación, validación, deduplicación, límites, cabeceras y bloqueo por intentos fallidos.
+autenticación, validación, deduplicación, límites, cabeceras, bloqueo por intentos fallidos y
+que una consulta colgada libere el turno de las estadísticas. `test_store.py` comprueba con
+psycopg (sin servidor) las opciones TCP de la conexión.
 
 ## Ideas para seguir
 
