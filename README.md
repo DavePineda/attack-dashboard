@@ -11,11 +11,11 @@ terceros, servida con una CSP estricta.
 
 ```mermaid
 flowchart LR
-  subgraph VPS1[VPS correo · InterServer]
+  subgraph VPS1[VPS correo]
     F1[fail2ban.log] --> A1[attack-shipper]
     U1[ufw.log] --> A1
   end
-  subgraph VPS2[VPS VPN · OCI]
+  subgraph VPS2[VPS VPN]
     F2[fail2ban.log] --> A2[attack-shipper]
     U2[ufw.log] --> A2
   end
@@ -34,6 +34,7 @@ flowchart LR
 |---|---|
 | Token del agente robado de la base | Solo se guarda su **SHA-256**; el token en claro vive únicamente en el VPS (`0640 root:attack-shipper`). Un token por servidor, revocable con un `UPDATE`. |
 | Fuerza bruta contra la ingesta | Tokens de 256 bits, limitador por IP y bloqueo progresivo tras 10 intentos fallidos. |
+| IP falsificada por el puerto directo del nodo | Con `TRUSTED_PROXIES` solo se aceptan conexiones del proxy de Botkeep (la IP de la conexión TCP no se puede falsificar); el resto recibe 403. |
 | Datos maliciosos en el lote | Validación estricta (tipos, rangos, regex), solo IPs públicas, máximo 2000 eventos y 1 MiB por lote; además `CHECK` en la base. Consultas siempre parametrizadas. |
 | Reenvíos y conteos duplicados | Índice único de deduplicación + `ON CONFLICT DO NOTHING`. El agente solo envía ventanas de UFW **cerradas**, así un reintento nunca produce conteos parciales. |
 | XSS / clickjacking en el dashboard | CSP `default-src 'none'` con solo `'self'`, sin `innerHTML` con datos, `X-Frame-Options: DENY`, `frame-ancestors 'none'`, sin CDNs. |
@@ -109,14 +110,23 @@ de conexión: se perdería la protección contra suplantación del servidor.
    - `SOURCE_URL=https://github.com/DavePineda/attack-dashboard`
    - opcionales: `RETENTION_DAYS` (30 por defecto), `PG_WORK_MEM` (32MB por defecto),
      `PUBLIC_MASK_IPS`, `SITE_TITLE`, `GEOIP_DB`
-4. **Domains:** conecta `dash.0r1sk.xyz` y crea el registro en Cloudflare.
+4. **Domains:** pulsa **Enable HTTPS** (activa el acceso web) y en **Custom domain** adjunta
+   `dash.0r1sk.xyz`. En Cloudflare crea los dos registros que muestra Botkeep (`A dash` y
+   `TXT _botkeep-challenge.dash`) en **Solo DNS** (nube gris, como exige Botkeep) y pulsa
+   **Verify DNS**: Botkeep emite y renueva el certificado de Let's Encrypt.
    La app escucha en `0.0.0.0:$SERVER_PORT`, como pide Botkeep.
 5. Arranca y revisa **Console**: debe decir `Esquema aplicado` y `Dashboard listo` (solo
    aparecen si la API se conectó a PostgreSQL). Luego abre `https://dash.0r1sk.xyz`: el
    dashboard debe cargar, aunque todavía no tenga eventos.
+6. **Cerrar el puerto directo.** El puerto directo del nodo de Botkeep sigue abierto aunque se
+   use el dominio, y ahí `X-Forwarded-For` lo escribe el propio cliente.
+   Envía una ingesta con un token falso a `https://dash.0r1sk.xyz/api/v1/ingest`; en
+   **Console** aparece `Ingesta rechazada: ... (conexión de X.X.X.X)`. Esa `X.X.X.X` es el
+   proxy de Botkeep: defínela en `TRUSTED_PROXIES` y reinicia. Desde entonces el puerto
+   directo responde 403 y el dominio sigue funcionando.
 
-Si el dominio pasa por el proxy de Cloudflare, define `CLIENT_IP_HEADER=cf-connecting-ip` para
-que el limitador vea la IP real del visitante. Hazlo **solo** en ese caso: si no, cualquiera
+`CLIENT_IP_HEADER=cf-connecting-ip` solo sirve si el dominio pasa por el proxy de Cloudflare
+(Botkeep pide nube gris, así que no se usa). Defínela **solo** en ese caso: si no, cualquiera
 podría falsificar esa cabecera.
 
 ### 3. Geolocalización (opcional)

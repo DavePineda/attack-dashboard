@@ -1,6 +1,7 @@
 """Configuración leída del entorno (Botkeep → pestaña Environment, o un archivo .env)."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from dataclasses import dataclass
@@ -51,6 +52,19 @@ def _pg_size(name: str, default: str) -> str:
     return value
 
 
+def _networks(name: str) -> tuple:
+    nets = []
+    for part in os.environ.get(name, "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            nets.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            raise ValueError(f"{name}: '{part}' no es una IP ni una red válida") from None
+    return tuple(nets)
+
+
 def _https_url(value: str) -> str:
     value = value.strip()
     return value if re.fullmatch(r"https://[^\s\"'<>]{1,300}", value) else ""
@@ -70,6 +84,10 @@ class Settings:
     trust_proxy: bool
     # CLIENT_IP_HEADER: p. ej. "cf-connecting-ip", solo si el dominio pasa por Cloudflare.
     client_ip_header: str
+    # TRUSTED_PROXIES: IPs o redes del proxy de Botkeep. Si se define, se rechaza (403) toda
+    # conexión que no venga de ellas, p. ej. el puerto directo del nodo, donde nadie añade la
+    # IP real y X-Forwarded-For lo escribiría el propio cliente.
+    trusted_proxies: tuple
     display_tz: ZoneInfo
     site_title: str
     source_url: str
@@ -89,6 +107,7 @@ class Settings:
             geoip_db=os.environ.get("GEOIP_DB", "").strip(),
             trust_proxy=_bool("TRUST_PROXY", True),
             client_ip_header=os.environ.get("CLIENT_IP_HEADER", "").strip().lower(),
+            trusted_proxies=_networks("TRUSTED_PROXIES"),
             display_tz=ZoneInfo(os.environ.get("DISPLAY_TZ", "America/Bogota")),
             site_title=os.environ.get("SITE_TITLE", "Ataques a 0r1sk.xyz").strip()[:80],
             source_url=_https_url(os.environ.get("SOURCE_URL", "")),

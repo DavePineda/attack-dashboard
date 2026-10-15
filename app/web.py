@@ -71,6 +71,37 @@ class SecurityHeaders:
         await self.app(scope, receive, wrapped)
 
 
+def peer_ip(scope) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """IP de quien abrió la conexión TCP: no se puede falsificar con cabeceras."""
+    client = scope.get("client")
+    try:
+        ip = ipaddress.ip_address(client[0]) if client else None
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip
+
+
+class ProxyOnly:
+    """Middleware ASGI puro: solo acepta conexiones de los proxies de TRUSTED_PROXIES.
+
+    Cierra el puerto directo del nodo de Botkeep, por donde se podría falsificar
+    X-Forwarded-For para saltarse el limitador y el bloqueo por fallos.
+    """
+
+    def __init__(self, app, trusted: tuple) -> None:
+        self.app, self.trusted = app, trusted
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            ip = peer_ip(scope)
+            if ip is None or not any(ip in net for net in self.trusted):
+                response = JSONResponse({"error": "Acceso directo no permitido"}, status_code=403)
+                return await response(scope, receive, send)
+        await self.app(scope, receive, send)
+
+
 class TokenBucket:
     """Limitador de tasa en memoria (suficiente para una sola instancia)."""
 
@@ -194,7 +225,9 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
                 sensor_cache[sha] = (time.monotonic() + 60, sensor)
         if sensor is None:
             auth_fail_limiter.allow(ip)
-            log.warning("Ingesta rechazada: token inválido desde %s", ip)
+            # La IP de conexión sirve para descubrir qué valor poner en TRUSTED_PROXIES.
+            log.warning("Ingesta rechazada: token inválido desde %s (conexión de %s)",
+                        ip, peer_ip(request.scope) or "desconocida")
             return error(401, "No autorizado", **{"WWW-Authenticate": "Bearer"})
 
         if "application/json" not in request.headers.get("content-type", ""):
@@ -291,6 +324,12 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
         task = asyncio.create_task(retention_loop()) if run_background else None
         log.info("Dashboard listo (máscara de IPs: %s, retención: %d días)",
                  settings.mask_ips, settings.retention_days)
+        if settings.trusted_proxies:
+            log.info("Solo se aceptan conexiones de: %s",
+                     ", ".join(str(net) for net in settings.trusted_proxies))
+        else:
+            log.warning("TRUSTED_PROXIES vacío: se acepta acceso directo al puerto y "
+                        "X-Forwarded-For podría ser falso")
         try:
             yield
         finally:
@@ -305,5 +344,7 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
         Mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
-    app.add_middleware(SecurityHeaders)
+    if settings.trusted_proxies:
+        app.add_middleware(ProxyOnly, trusted=settings.trusted_proxies)
+    app.add_middleware(SecurityHeaders)  # la última añadida es la más externa
     return app

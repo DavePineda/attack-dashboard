@@ -4,6 +4,7 @@ Requiere starlette y uvicorn: python3 -m unittest discover tests
 """
 import hashlib
 import json
+import os
 import socket
 import sys
 import threading
@@ -64,21 +65,25 @@ def free_port():
         return s.getsockname()[1]
 
 
+def start_server(app):
+    port = free_port()
+    server = uvicorn.Server(uvicorn.Config(app, port=port, log_level="error",
+                                           server_header=False, date_header=False))
+    threading.Thread(target=server.run, daemon=True).start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    return server, port
+
+
 class WebTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import os
         os.environ.update({"DATABASE_URL": "x", "STATS_CACHE_SECONDS": "0", "TRUST_PROXY": "true"})
         cls.store = FakeStore()
         app = create_app(Settings.from_env(), cls.store, run_background=False)
-        cls.port = free_port()
-        cls.server = uvicorn.Server(uvicorn.Config(app, port=cls.port, log_level="error",
-                                                    server_header=False, date_header=False))
-        threading.Thread(target=cls.server.run, daemon=True).start()
-        for _ in range(100):
-            if cls.server.started:
-                break
-            time.sleep(0.05)
+        cls.server, cls.port = start_server(app)
 
     @classmethod
     def tearDownClass(cls):
@@ -158,6 +163,43 @@ class WebTests(unittest.TestCase):
         # Otra IP no se ve afectada, y un token válido desde la IP bloqueada también espera.
         self.assertEqual(self.req("/api/v1/ingest", {"events": []}, xff="203.0.113.51")[0], 200)
         self.assertEqual(self.req("/api/v1/ingest", {"events": []}, xff="1.1.1.1, 203.0.113.50")[0], 429)
+
+
+class ProxyOnlyTests(unittest.TestCase):
+    """Con TRUSTED_PROXIES solo pasan las conexiones del proxy (en la prueba, 127.0.0.1)."""
+
+    def start(self, trusted):
+        os.environ["TRUSTED_PROXIES"] = trusted
+        try:
+            settings = Settings.from_env()
+        finally:
+            del os.environ["TRUSTED_PROXIES"]
+        server, port = start_server(create_app(settings, FakeStore(), run_background=False))
+        self.addCleanup(setattr, server, "should_exit", True)
+        return port
+
+    def get(self, port):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as resp:
+                return resp.status, dict(resp.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers)
+
+    def test_direct_connection_is_rejected(self):
+        status, headers = self.get(self.start("10.9.8.0/24"))
+        self.assertEqual(status, 403)
+        self.assertEqual(headers.get("x-frame-options"), "DENY")  # cabeceras de seguridad igual
+
+    def test_trusted_proxy_is_accepted(self):
+        self.assertEqual(self.get(self.start("127.0.0.1"))[0], 200)
+
+    def test_invalid_value_fails_at_startup(self):
+        os.environ["TRUSTED_PROXIES"] = "no-es-una-ip"
+        try:
+            with self.assertRaises(ValueError):
+                Settings.from_env()
+        finally:
+            del os.environ["TRUSTED_PROXIES"]
 
 
 if __name__ == "__main__":

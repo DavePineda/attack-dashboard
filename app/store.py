@@ -138,20 +138,24 @@ class PgStore:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
 
-        self._pool = AsyncConnectionPool(
-            self._dsn, min_size=1, max_size=4, open=False, timeout=10,
-            kwargs={"autocommit": True, "row_factory": dict_row},
-            configure=self._configure,
-        )
         for attempt in range(1, 11):
+            # Un pool que no logró abrir queda cerrado y no se puede reutilizar:
+            # cada intento necesita uno nuevo.
+            pool = AsyncConnectionPool(
+                self._dsn, min_size=1, max_size=4, open=False, timeout=10,
+                kwargs={"autocommit": True, "row_factory": dict_row},
+                configure=self._configure,
+            )
             try:
-                await self._pool.open(wait=True, timeout=10)
+                await pool.open(wait=True, timeout=10)
                 break
             except Exception as exc:  # la base puede tardar en arrancar
+                await pool.close()
                 log.warning("PostgreSQL no disponible (intento %d/10): %s", attempt, exc)
                 if attempt == 10:
                     raise
                 await asyncio.sleep(3)
+        self._pool = pool
         async with self._pool.connection() as conn:
             await conn.execute(SCHEMA)
         log.info("Esquema aplicado")
