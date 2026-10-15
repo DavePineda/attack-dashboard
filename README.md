@@ -123,7 +123,9 @@ de conexión: se perdería la protección contra suplantación del servidor.
    Envía una ingesta con un token falso a `https://dash.0r1sk.xyz/api/v1/ingest`; en
    **Console** aparece `Ingesta rechazada: ... (conexión de X.X.X.X)`. Esa `X.X.X.X` es el
    proxy de Botkeep: defínela en `TRUSTED_PROXIES` y reinicia. Desde entonces el puerto
-   directo responde 403 y el dominio sigue funcionando.
+   directo responde 403 y el dominio sigue funcionando. Si algún día el dominio también
+   responde `Acceso directo no permitido`, Botkeep cambió la IP de su proxy: vacía
+   `TRUSTED_PROXIES`, reinicia, repite la prueba y define la IP nueva.
 
 `CLIENT_IP_HEADER=cf-connecting-ip` solo sirve si el dominio pasa por el proxy de Cloudflare
 (Botkeep pide nube gris, así que no se usa). Defínela **solo** en ese caso: si no, cualquiera
