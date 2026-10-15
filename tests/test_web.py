@@ -146,6 +146,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(headers["cache-control"], "no-store")
         self.assertNotIn("server", {k.lower() for k in headers})
         self.assertEqual(len(body["timeline"]["buckets"]), 25)
+        self.assertEqual(body["geoip_attribution_url"], "")  # sin GeoIP no hay atribución
         self.assertEqual(self.req("/api/v1/stats?range=1y", token=None)[0], 400)
 
     def test_static_index(self):

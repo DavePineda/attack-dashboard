@@ -228,8 +228,11 @@
 
     const attrib = $("geo-attrib");
     attrib.hidden = !(d.geoip && d.geoip_attribution);
-    attrib.textContent = d.geoip_attribution || "";
-    const src = document.querySelector(".foot a");
+    // La licencia de DB-IP (CC BY 4.0) pide un enlace a su sitio en la página que usa sus datos.
+    attrib.replaceChildren(d.geoip_attribution_url
+      ? el("a", { href: d.geoip_attribution_url, rel: "noopener" }, d.geoip_attribution || "")
+      : d.geoip_attribution || "");
+    const src = $("source-link");
     if (d.source_url) src.href = d.source_url; else src.closest("p").hidden = true;
     updateStatus();
   }

@@ -92,6 +92,7 @@ class Settings:
     site_title: str
     source_url: str
     geoip_attribution: str
+    geoip_attribution_url: str
     max_batch: int
     stats_cache_seconds: int
 
@@ -113,6 +114,7 @@ class Settings:
             source_url=_https_url(os.environ.get("SOURCE_URL", "")),
             geoip_attribution=os.environ.get(
                 "GEOIP_ATTRIBUTION", "Geolocalización por país: DB-IP.com (CC BY 4.0)").strip()[:200],
+            geoip_attribution_url=_https_url(os.environ.get("GEOIP_ATTRIBUTION_URL", "https://db-ip.com")),
             max_batch=_int("INGEST_MAX_EVENTS", 2000, 1, 10000),
             stats_cache_seconds=_int("STATS_CACHE_SECONDS", 60, 0, 3600),
         )

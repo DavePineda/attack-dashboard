@@ -134,9 +134,20 @@ podría falsificar esa cabecera.
 ### 3. Geolocalización (opcional)
 
 Descarga **DB-IP IP to Country Lite** en formato MMDB (licencia CC BY 4.0, gratuita, sin
-registro), súbela a la app como `data/country.mmdb` y define `GEOIP_DB=data/country.mmdb`.
-El pie del dashboard muestra la atribución que exige la licencia. MaxMind GeoLite2-Country
-también funciona; en ese caso ajusta `GEOIP_ATTRIBUTION`.
+registro) desde `https://db-ip.com/db/download/ip-to-country-lite` y descomprímela. En
+**Files** súbela a `data/` conservando el mes en el nombre y define
+`GEOIP_DB=/home/container/data/dbip-country-lite-AAAA-MM.mmdb`. Al reiniciar, la consola dice
+`Base GeoIP cargada: ...`. El país se calcula cuando llega cada evento, así que conviene
+configurarla antes de conectar los agentes.
+
+El pie del dashboard muestra la atribución con el enlace a DB-IP que exige la licencia
+(`GEOIP_ATTRIBUTION` y `GEOIP_ATTRIBUTION_URL`). MaxMind GeoLite2-Country también funciona;
+en ese caso ajusta esas dos variables.
+
+**Actualización (cada 3 meses es suficiente; DB-IP publica una versión al mes):** sube el
+archivo del mes nuevo junto al anterior, cambia `GEOIP_DB` al nombre nuevo, reinicia y borra
+el viejo. Así nunca se sobrescribe el archivo que la API tiene abierto. La carpeta `data/` no
+está en el repositorio: sobrevive a los Sync con **Merge files**, no con **Replace files**.
 
 ### 4. Registrar cada VPS
 

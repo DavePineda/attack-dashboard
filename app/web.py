@@ -283,6 +283,7 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
             "masked": settings.mask_ips,
             "geoip": geo.enabled,
             "geoip_attribution": settings.geoip_attribution if geo.enabled else "",
+            "geoip_attribution_url": settings.geoip_attribution_url if geo.enabled else "",
             "source_url": settings.source_url,
             "retention_days": settings.retention_days,
             "timezone": settings.display_tz.key,
