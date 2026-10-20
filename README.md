@@ -106,6 +106,17 @@ que tarden más de 20 s (el dashboard muestra un error y reintenta al minuto). A
 falla en menos de un minuto en vez de colgar el dashboard hasta reiniciar. Si pones alguna de
 esas opciones en la URL, manda la tuya.
 
+En cada arranque, antes de conectar, la API prueba la red hasta la base (TCP, 5 s) y lo deja en
+**Console**: `Red hacia PostgreSQL <ip>:<puerto>: OK (0.0 s)`. Si falla, dice el motivo:
+- *sin respuesta en 5 s*: los paquetes se pierden por el camino (red entre nodos o cortafuegos de
+  Botkeep). Es lo que pasó el 16/10/2026 con la base sana vista desde fuera: abre un ticket.
+- *conexión rechazada*: nadie escucha en ese puerto (¿base parada?).
+- *no se pudo resolver el nombre*: problema de DNS.
+
+Tras un fallo añade una prueba de control a `1.1.1.1:443` para saber si falla solo la base o toda
+la salida a internet. La prueba solo informa: después siguen los reintentos normales. No muestra
+usuario ni contraseña.
+
 ### 2. API
 
 1. **Create → Applications → Python** con **512 MB de RAM, 0,5 vCPU y 512 MB de disco**,
@@ -122,7 +133,7 @@ esas opciones en la URL, manda la tuya.
    `TXT _botkeep-challenge.dash`) en **Solo DNS** (nube gris, como exige Botkeep) y pulsa
    **Verify DNS**: Botkeep emite y renueva el certificado de Let's Encrypt.
    La app escucha en `0.0.0.0:$SERVER_PORT`, como pide Botkeep.
-5. Arranca y revisa **Console**: debe decir `Esquema aplicado` y `Dashboard listo` (solo
+5. Arranca y revisa **Console**: debe decir `Red hacia PostgreSQL …: OK`, `Esquema aplicado` y `Dashboard listo` (los dos últimos solo
    aparecen si la API se conectó a PostgreSQL). Luego abre `https://dash.0r1sk.xyz`: el
    dashboard debe cargar, aunque todavía no tenga eventos.
 6. **Cerrar el puerto directo.** El puerto directo del nodo de Botkeep sigue abierto aunque se

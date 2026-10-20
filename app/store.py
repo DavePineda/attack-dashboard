@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -124,6 +126,59 @@ def tcp_options(dsn: str) -> dict[str, int]:
     return {k: v for k, v in TCP_DEFAULTS.items() if k not in given}
 
 
+# Prueba de red en cada arranque: separa un problema de red entre nodos (como el del 16/10,
+# con la base sana desde fuera) de uno de credenciales o TLS. Solo informa, no frena el arranque.
+PROBE_TIMEOUT = 5.0
+CONTROL_ADDR = ("1.1.1.1", 443)
+
+
+def db_address(dsn: str) -> tuple[str, int] | None:
+    """Host (o hostaddr) y puerto de DATABASE_URL; None si es un socket local."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    info = conninfo_to_dict(dsn)
+    host = (info.get("hostaddr") or info.get("host") or "localhost").split(",")[0]
+    if host.startswith("/"):
+        return None
+    return host, int(str(info.get("port") or 5432).split(",")[0])
+
+
+async def tcp_probe(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> tuple[bool, str]:
+    """Abre y cierra una conexión TCP. Devuelve (éxito, detalle para el log)."""
+    start = time.monotonic()
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+    except TimeoutError:  # antes que OSError: es una subclase
+        return False, (f"sin respuesta en {timeout:g} s (los paquetes se pierden por el camino: "
+                       "red entre nodos o cortafuegos)")
+    except ConnectionRefusedError:
+        return False, "conexión rechazada (nadie escucha en ese puerto: ¿base parada?)"
+    except socket.gaierror as exc:
+        return False, f"no se pudo resolver el nombre ({exc})"
+    except OSError as exc:
+        return False, f"error de red ({exc})"
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError:
+        pass
+    return True, f"OK ({time.monotonic() - start:.1f} s)"
+
+
+async def check_network(dsn: str) -> None:
+    addr = db_address(dsn)
+    if addr is None:
+        return
+    ok, detail = await tcp_probe(*addr)
+    if ok:
+        log.info("Red hacia PostgreSQL %s:%d: %s", *addr, detail)
+        return
+    log.warning("Red hacia PostgreSQL %s:%d: %s", *addr, detail)
+    # ¿Falla solo la base o toda la salida a internet?
+    ok, detail = await tcp_probe(*CONTROL_ADDR)
+    log.warning("Control de salida a internet %s:%d: %s", *CONTROL_ADDR, detail)
+
+
 class Store(Protocol):
     async def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -158,6 +213,7 @@ class PgStore:
         from psycopg.rows import dict_row
         from psycopg_pool import AsyncConnectionPool
 
+        await check_network(self._dsn)
         tcp = tcp_options(self._dsn)
         for attempt in range(1, 11):
             # Un pool que no logró abrir queda cerrado y no se puede reutilizar:
