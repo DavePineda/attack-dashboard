@@ -11,6 +11,7 @@
   --text-muted:    #8f8e86;
   --series-1:      #3987e5; /* Fail2ban */
   --series-2:      #d95926; /* UFW */
+  --series-3:      #9b6ef3; /* Países: mezcla las dos fuentes */
   --bar-track:     #2a2a27;
   --accent:        #3987e5;
   --good:          #0ca30c;
@@ -31,6 +32,7 @@
     --text-muted:    #6d6c67;
     --series-1:      #2a78d6;
     --series-2:      #eb6834;
+    --series-3:      #7a4fd6;
     --bar-track:     #ecebe7;
     --accent:        #2a78d6;
     --focus:         #256abf;
@@ -71,6 +73,7 @@ a { color: var(--accent); }
 }
 .seg button[aria-checked="true"] { background: var(--surface-1); color: var(--text-primary); box-shadow: 0 0 0 1px var(--border); }
 .status { margin: 0; font-size: 13px; color: var(--text-muted); min-width: 12ch; }
+.status strong { color: var(--text-primary); font-weight: 600; }
 
 /* KPIs */
 main { padding-top: 20px; padding-bottom: 8px; display: grid; gap: 16px; }
@@ -102,7 +105,7 @@ main { padding-top: 20px; padding-bottom: 8px; display: grid; gap: 16px; }
 .chart .bar-2 { fill: var(--series-2); }
 .chart .hit { fill: transparent; cursor: default; }
 .chart .hover-band { fill: var(--text-primary); opacity: 0; pointer-events: none; }
-.chart .hover-band.on { opacity: .06; }
+.chart .hover-band.on { opacity: .1; }
 .empty { display: grid; place-items: center; height: 100%; color: var(--text-muted); font-size: 13px; text-align: center; }
 
 .as-table { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
@@ -118,6 +121,7 @@ main { padding-top: 20px; padding-bottom: 8px; display: grid; gap: 16px; }
 .bars .track { grid-column: 1 / -1; height: 6px; border-radius: 4px; background: var(--bar-track); overflow: hidden; }
 .bars .fill { height: 100%; border-radius: 4px; background: var(--series-1); min-width: 2px; }
 .bars.series-2 .fill { background: var(--series-2); }
+.bars.series-3 .fill { background: var(--series-3); }
 .bars .empty { height: auto; padding: 24px 0; }
 
 /* Tabla */
@@ -139,6 +143,7 @@ table.data tr:last-child td { border-bottom: 0; }
 }
 .tooltip strong { display: block; font-size: 13px; }
 .tooltip .muted { color: var(--text-muted); }
+.tooltip .line { display: flex; align-items: center; gap: 6px; }
 
 .foot { color: var(--text-muted); font-size: 13px; padding-top: 8px; padding-bottom: 32px; }
 .foot p { margin: 6px 0; max-width: 80ch; }

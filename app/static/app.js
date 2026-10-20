@@ -4,6 +4,12 @@
   const $ = (id) => document.getElementById(id);
   const SVG = "http://www.w3.org/2000/svg";
   const REFRESH_MS = 60_000;
+  // El agente da señal cada 2 min, aunque no haya ataques: 10 min sin ella es un fallo.
+  const LIVE_MS = 10 * 60_000;
+  const SERIES = [
+    { key: "fail2ban", n: "1", unit: "baneos" },
+    { key: "ufw", n: "2", unit: "paquetes" },
+  ];
   const nf = new Intl.NumberFormat("es-CO");
   const dec1 = new Intl.NumberFormat("es-CO", { maximumFractionDigits: 1 });
   const compact = { format: (v) => (Math.abs(v) >= 1e6 ? `${dec1.format(v / 1e6)} M`
@@ -83,9 +89,24 @@
   };
   const hideTip = () => { tip.hidden = true; };
 
+  // Las dos gráficas comparten periodos: la hora bajo el puntero se resalta en ambas.
+  const bands = {};
+  const highlight = (i) => {
+    for (const list of Object.values(bands)) list.forEach((band, j) => band.classList.toggle("on", j === i));
+  };
+  const clearHover = () => { highlight(-1); hideTip(); };
+  const bucketTip = (b) => [el("strong", {}, fmtBucket(b.t)), ...SERIES.map((s) =>
+    el("span", { class: "line" }, el("span", { class: "key", "data-series": s.n }),
+       `${nf.format(b[s.key])} ${s.unit}`))];
+  // En pantallas táctiles no hay "salir" del puntero: el resaltado se quita al tocar fuera.
+  document.addEventListener("pointerdown", (evt) => { if (!evt.target.closest(".chart")) clearHover(); });
+  // El tooltip es fijo a la ventana: al desplazarse quedaría lejos de su barra.
+  window.addEventListener("scroll", hideTip, { passive: true });
+
   // ---------------------------------------------------------------- gráfico de barras
-  function barChart(container, buckets, key, seriesClass, unitLabel) {
+  function barChart(container, buckets, key, seriesClass) {
     container.replaceChildren();
+    bands[key] = [];
     const total = buckets.reduce((a, b) => a + b[key], 0);
     if (!buckets.length || total === 0) {
       container.append(el("div", { class: "empty" }, "Sin eventos en este rango."));
@@ -119,6 +140,7 @@
       const y = m.top + h - bh;
       const band = svgEl("rect", { class: "hover-band", x: m.left + i * slot, y: m.top, width: slot, height: h });
       svg.append(band);
+      bands[key].push(band);
       if (bh > 0) {
         const r = Math.min(4, barW / 2, bh);
         const bottom = m.top + h;
@@ -133,12 +155,10 @@
         svg.append(t);
       }
       const hit = svgEl("rect", { class: "hit", x: m.left + i * slot, y: m.top, width: slot, height: h + m.bottom });
-      hit.addEventListener("pointermove", (evt) => {
-        band.classList.add("on");
-        showTip(evt, [el("strong", {}, `${nf.format(b[key])} ${unitLabel}`),
-                      el("span", { class: "muted" }, fmtBucket(b.t))]);
-      });
-      hit.addEventListener("pointerleave", () => { band.classList.remove("on"); hideTip(); });
+      const show = (evt) => { highlight(i); showTip(evt, bucketTip(b)); };
+      hit.addEventListener("pointermove", show);
+      hit.addEventListener("pointerdown", show);
+      hit.addEventListener("pointerleave", (evt) => { if (evt.pointerType !== "touch") clearHover(); });
       svg.append(hit);
     });
     container.append(svg);
@@ -192,12 +212,15 @@
     const sum = (k) => b.reduce((a, x) => a + x[k], 0);
     $("t-f2b-sub").textContent = `${nf.format(sum("fail2ban"))} baneos · ${per}`;
     $("t-ufw-sub").textContent = `${nf.format(sum("ufw"))} paquetes · ${per}`;
-    barChart($("chart-f2b"), b, "fail2ban", "bar-1", "baneos");
-    barChart($("chart-ufw"), b, "ufw", "bar-2", "paquetes");
+    clearHover();
+    barChart($("chart-f2b"), b, "fail2ban", "bar-1");
+    barChart($("chart-ufw"), b, "ufw", "bar-2");
     dataTable($("table-f2b"), b, "fail2ban", "Baneos");
     dataTable($("table-ufw"), b, "ufw", "Paquetes");
 
-    barList($("countries"), d.countries.map((c) => ({ ...c, value: c.ips })), (c) => ({
+    const countries = $("countries");
+    countries.classList.add("series-3");
+    barList(countries, d.countries.map((c) => ({ ...c, value: c.ips })), (c) => ({
       name: `${flag(c.country)}  ${countryName(c.country)}`, value: c.ips,
       valueText: `${nf.format(c.ips)} IP${c.ips === 1 ? "" : "s"}`,
     }), d.geoip ? "Sin eventos en este rango." : "Configura GEOIP_DB para ver países.");
@@ -237,12 +260,18 @@
     updateStatus();
   }
 
+  const setLive = (live) => document.querySelector(".pulse").classList.toggle("stale", !live);
+
+  // "En vivo" depende del latido del agente, no del último evento: UFW entrega sus
+  // ventanas de 10 min ya cerradas, así que el último evento suele tener 10-20 min.
   function updateStatus() {
     if (!data) return;
+    const beat = data.sensors.last_seen;
+    const live = Boolean(beat) && Date.now() - new Date(beat).getTime() <= LIVE_MS;
     const last = data.summary.last_event;
-    $("status").textContent = `Último evento ${ago(last)}`;
-    const stale = !last || Date.now() - new Date(last).getTime() > 6 * 3600 * 1000;
-    document.querySelector(".pulse").classList.toggle("stale", stale);
+    $("status").replaceChildren(el("strong", {}, live ? "En vivo" : "Sin señal del agente"),
+      ` · ${last ? `último evento ${ago(last)}` : "sin eventos en este rango"}`);
+    setLive(live);
   }
 
   // ---------------------------------------------------------------- datos
@@ -255,6 +284,7 @@
       render();
     } catch (err) {
       $("status").textContent = "No se pudieron cargar los datos";
+      setLive(false);
       console.error(err);
     }
   }
