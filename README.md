@@ -1,7 +1,8 @@
 # Dashboard de ataques · 0r1sk.xyz
 
 Telemetría en vivo de lo que **Fail2ban** y **UFW** bloquean en mis servidores: baneos por
-servicio, puertos escaneados, países de origen y las redes más insistentes.
+servicio, puertos escaneados, países de origen y las redes más insistentes. Arriba, el estado
+del servidor de correo: CPU, RAM, swap y disco, con su evolución en el rango elegido.
 
 Un agente sin dependencias en cada VPS lee los logs y los envía por HTTPS a una API en Python
 con PostgreSQL, alojada en Botkeep. El dashboard es una página estática sin librerías de
@@ -39,7 +40,9 @@ flowchart LR
 | Reenvíos y conteos duplicados | Índice único de deduplicación + `ON CONFLICT DO NOTHING`. El agente solo envía ventanas de UFW **cerradas**, así un reintento nunca produce conteos parciales. |
 | XSS / clickjacking en el dashboard | CSP `default-src 'none'` con solo `'self'`, sin `innerHTML` con datos, `X-Frame-Options: DENY`, `frame-ancestors 'none'`, sin CDNs. |
 | Exponer a terceros | Las IPs se publican agrupadas en **/24 (IPv4) y /48 (IPv6)**. La geolocalización es una base local: las IPs nunca salen del servidor. |
-| Agente comprometido en el VPS | Usuario de sistema sin shell, `ProtectSystem=strict`, sin capabilities, filtro de syscalls, `/var/log` de solo lectura, límites de memoria y CPU. |
+| Agente comprometido en el VPS | Usuario de sistema sin shell, `ProtectSystem=strict`, sin capabilities, filtro de syscalls, `/var/log` de solo lectura, límites de memoria y CPU. `ProtectProc=invisible`: no ve los procesos de otros usuarios (sí `/proc/stat`, `/proc/meminfo` y `/proc/loadavg`, para el estado del servidor). |
+| Líneas falsas en `ufw.log` | Cualquier usuario puede escribir `[UFW BLOCK]` en syslog con `logger`: el agente solo acepta líneas con la etiqueta `kernel:`. |
+| Token reenviado por una redirección | El agente no sigue redirecciones: un 3xx es un error y el token solo va a `SHIPPER_ENDPOINT`. |
 | Crecimiento de la base (1,5 GB de disco para PostgreSQL) | UFW se agrega por ventanas de 10 min y una tarea borra lo que supera `RETENTION_DAYS` (30 días por defecto, el rango máximo del dashboard). |
 | Servidor sobrecargado | Caché de estadísticas de 60 s, una sola consulta pesada a la vez y límite de solicitudes públicas. |
 
@@ -193,12 +196,38 @@ Requisitos: Python 3.9+, `ufw logging low` (o superior) y logs legibles por el g
 propias IPs y la red de la VPN. La primera ejecución empieza desde el final de los logs; usa
 `SHIPPER_BACKFILL=1` una sola vez si quieres enviar el historial existente.
 
+**Estado del servidor.** En cada ejecución (cada 2 min) el agente envía también:
+
+- **CPU**: uso medio desde la ejecución anterior, calculado con `/proc/stat` y los contadores
+  que guarda en `state.json` (la primera ejecución no tiene valor). Carga de 1, 5 y 15 min.
+- **RAM**: usada = total − disponible (la caché que Linux libera no cuenta), y swap.
+- **Disco `/`**: tamaño, usado y libre, con el mismo criterio que `df`.
+- **Cabecera**: hostname, sistema (`/etc/os-release`), kernel, IPv4/IPv6 públicas de salida y
+  `SHIPPER_HOST_LABEL` / `SHIPPER_HOST_SERVICE` de `shipper.env`. El agente no puede leer la
+  versión de Mox: actualiza `SHIPPER_HOST_SERVICE` a mano cuando actualices Mox.
+
+`SHIPPER_METRICS=0` lo desactiva. La API guarda una fila por ejecución, con la misma retención
+que los eventos; el dashboard muestra la serie completa en 24 h y medias por hora en 7 y 30 días.
+Umbrales de la tarjeta: CPU 75/90 %, RAM y disco 80/90 % (ámbar/rojo), y "Sin señal" si el
+agente lleva más de 10 min sin enviar.
+
+**Actualizar el agente** (no toca `shipper.env`): copia de nuevo `agent/` al VPS y ejecuta
+`sudo /tmp/attack-shipper/install.sh`. Antes de pasar a la 1.1, comprueba que tu `ufw.log` usa
+la etiqueta `kernel:`; los dos números deben coincidir:
+
+```bash
+grep -c "\[UFW BLOCK\]" /var/log/ufw.log
+```
+```bash
+grep -c "kernel: \[UFW BLOCK\]" /var/log/ufw.log
+```
+
 ## API
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `POST` | `/api/v1/ingest` | `Authorization: Bearer <token>`, cuerpo `{"events": [...]}`. Responde `accepted`, `inserted`, `duplicates`, `rejected`. |
-| `GET` | `/api/v1/stats?range=24h\|7d\|30d` | Resumen, serie temporal, países, puertos, jails y orígenes. |
+| `POST` | `/api/v1/ingest` | `Authorization: Bearer <token>`, cuerpo `{"events": [...]}` y, desde el agente 1.1, `"metrics"` y `"host"` opcionales. Responde `accepted`, `inserted`, `duplicates`, `rejected` y `metrics` (si se guardó el estado del servidor). Un estado inválido se descarta sin perder los eventos. |
+| `GET` | `/api/v1/stats?range=24h\|7d\|30d` | Resumen, serie temporal, países, puertos, jails, orígenes y `server` (estado del servidor, o `null`). |
 
 Evento:
 
@@ -214,9 +243,12 @@ python3 -m unittest discover tests -v
 ```
 
 `test_shipper.py` usa solo la biblioteca estándar (parsers, agregación, ventanas cerradas,
-reintentos, rotación de logs). `test_web.py` levanta la API con un almacén falso y prueba
-autenticación, validación, deduplicación, límites, cabeceras, bloqueo por intentos fallidos y
-que una consulta colgada libere el turno de las estadísticas. `test_store.py` comprueba con
+reintentos, rotación de logs, lectura de CPU/RAM con un `/proc` falso, líneas UFW sin
+`kernel:`, que no siga redirecciones). Fija la zona horaria con `time.tzset`, que no existe en
+Windows: allí fallan 4 pruebas de fechas; córrelas en Linux. `test_web.py` levanta la API con
+un almacén falso y prueba autenticación, validación, deduplicación, límites, cabeceras, bloqueo
+por intentos fallidos, el estado del servidor y que una consulta colgada libere el turno de las
+estadísticas. `test_ingest.py` valida el estado del servidor. `test_store.py` comprueba con
 psycopg (sin servidor) las opciones TCP de la conexión.
 
 ## Ideas para seguir

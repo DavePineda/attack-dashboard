@@ -1,12 +1,16 @@
 """Pruebas del agente. Solo biblioteca estándar: python3 -m unittest discover tests"""
+import http.server
 import ipaddress
 import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agent"))
 import shipper  # noqa: E402
@@ -63,6 +67,15 @@ class ParserTests(unittest.TestCase):
         icmp = ufw_line("Oct 14 10:00:00", "45.33.32.1", proto="ICMP").replace(" DPT=22", "")
         self.assertIsNone(shipper.parse_ufw(icmp, now, [])["dport"])
 
+    def test_ufw_only_kernel_lines(self):
+        # `logger "[UFW BLOCK] …"` deja la etiqueta del usuario o la que elija, no "kernel:".
+        now = datetime(2026, 10, 14, 16, 0, tzinfo=timezone.utc)
+        real = ufw_line("Oct 14 10:00:00", "45.33.32.1")
+        self.assertIsNotNone(shipper.parse_ufw(real, now, []))
+        for tag in ("root:", "logger:", "kernel[123]:", "evil: kernel:"):
+            forged = real.replace("vps kernel:", f"vps {tag}")
+            self.assertIsNone(shipper.parse_ufw(forged, now, []), tag)
+
 
 class RunTests(unittest.TestCase):
     def setUp(self):
@@ -73,7 +86,7 @@ class RunTests(unittest.TestCase):
         self.ufw.write_text("")
         self.cfg = shipper.Config(endpoint="https://x/api", token="t" * 40,
                                   fail2ban_log=str(self.f2b), ufw_log=str(self.ufw),
-                                  bucket_seconds=600, state_dir=self.dir)
+                                  bucket_seconds=600, state_dir=self.dir, metrics=False)
         self.sent = []
 
     def sender(self, cfg, payload):
@@ -132,6 +145,116 @@ class RunTests(unittest.TestCase):
         shipper.run(self.cfg, datetime(2026, 10, 14, 16, 0, tzinfo=timezone.utc), self.sender)
         state = json.loads((self.dir / "state.json").read_text())
         self.assertEqual(set(state), {"fail2ban", "ufw"})
+
+
+MEMINFO = ("MemTotal:        2000000 kB\nMemFree:          100000 kB\n"
+           "MemAvailable:     700000 kB\nSwapTotal:       1000000 kB\nSwapFree:         900000 kB\n")
+DISK = {"disk_total": 40_000, "disk_used": 14_000, "disk_avail": 24_000}
+
+
+def proc_stat(user, idle, iowait=0):
+    return f"cpu  {user} 0 0 {idle} {iowait} 0 0 0 0 0\ncpu0 {user} 0 0 {idle} {iowait} 0 0 0 0 0\n"
+
+
+class MetricsTests(unittest.TestCase):
+    def setUp(self):
+        self.proc = Path(tempfile.mkdtemp())
+        (self.proc / "meminfo").write_text(MEMINFO)
+        (self.proc / "loadavg").write_text("0.42 0.38 0.35 1/234 5678\n")
+        (self.proc / "stat").write_text(proc_stat(1000, 9000))
+
+    def test_cpu_is_the_average_between_two_readings(self):
+        first = shipper.read_cpu(self.proc)
+        self.assertEqual(first, (10000, 9000))
+        (self.proc / "stat").write_text(proc_stat(1250, 9700, iowait=50))
+        # 1000 ticks nuevos: 750 inactivos (700 idle + 50 iowait) → 25 % de uso.
+        self.assertEqual(shipper.cpu_percent(first, shipper.read_cpu(self.proc)), 25.0)
+        self.assertIsNone(shipper.cpu_percent(None, first))          # primera lectura
+        self.assertIsNone(shipper.cpu_percent((99999, 1), first))    # reinicio del servidor
+
+    def test_memory_excludes_cache_and_load(self):
+        self.assertEqual(shipper.read_memory(self.proc), {
+            "mem_total": 2_048_000_000, "mem_used": 1_331_200_000,
+            "swap_total": 1_024_000_000, "swap_used": 102_400_000})
+        self.assertEqual(shipper.read_load(self.proc), [0.42, 0.38, 0.35])
+
+    def test_unreadable_proc_gives_none(self):
+        empty = Path(tempfile.mkdtemp())
+        self.assertIsNone(shipper.read_cpu(empty))
+        self.assertIsNone(shipper.read_memory(empty))
+        self.assertIsNone(shipper.read_load(empty))
+
+    @unittest.skipUnless(hasattr(os, "statvfs"), "statvfs solo existe en Unix")
+    def test_disk_like_df(self):
+        disk = shipper.read_disk("/")
+        self.assertGreater(disk["disk_total"], 0)
+        self.assertLessEqual(disk["disk_used"] + disk["disk_avail"], disk["disk_total"])
+
+    def test_os_name(self):
+        path = self.proc / "os-release"
+        path.write_text('NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04.5 LTS"\n')
+        self.assertEqual(shipper.os_name(path), "Ubuntu 24.04.5 LTS")
+        self.assertIsNone(shipper.os_name(self.proc / "no-existe"))
+
+    def test_run_sends_metrics_once_and_keeps_cpu_counters(self):
+        state_dir = Path(tempfile.mkdtemp())
+        f2b = state_dir / "fail2ban.log"
+        f2b.write_text("")
+        cfg = shipper.Config(endpoint="https://x/api", token="t" * 40, fail2ban_log=str(f2b),
+                             ufw_log="", state_dir=state_dir, proc_dir=self.proc, max_batch=1)
+        payloads = []
+
+        def sender(cfg, payload):
+            payloads.append(payload)
+            return {"accepted": len(payload["events"]), "inserted": 0, "rejected": 0}
+
+        now = datetime(2026, 10, 14, 16, 0, tzinfo=timezone.utc)
+        with mock.patch.object(shipper, "read_disk", return_value=DISK), \
+             mock.patch.object(shipper, "host_info", return_value={"hostname": "mail.example"}):
+            shipper.run(cfg, now, sender)
+            self.assertIsNone(payloads[0]["metrics"]["cpu_pct"])  # aún no hay lectura previa
+            (self.proc / "stat").write_text(proc_stat(1500, 9500))
+            with f2b.open("a") as fh:  # dos eventos con max_batch=1 → dos lotes
+                fh.write(F2B.splitlines(True)[0] + F2B.splitlines(True)[1])
+            payloads.clear()
+            shipper.run(cfg, now, sender)
+
+        self.assertEqual(len(payloads), 2)
+        first, second = payloads
+        self.assertEqual(first["metrics"]["cpu_pct"], 50.0)
+        self.assertEqual(first["metrics"]["load"], [0.42, 0.38, 0.35])
+        self.assertEqual(first["metrics"]["disk_used"], 14_000)
+        self.assertEqual(first["host"], {"hostname": "mail.example"})
+        self.assertNotIn("metrics", second)
+        self.assertNotIn("host", second)
+        state = json.loads((state_dir / "state.json").read_text())
+        self.assertEqual(state["cpu"], [11000, 9500])
+
+
+class RedirectTests(unittest.TestCase):
+    def test_post_does_not_follow_redirects(self):
+        hits = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/robado")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        cfg = shipper.Config(endpoint=f"http://127.0.0.1:{server.server_port}/api",
+                             token="t" * 40, state_dir=Path(tempfile.mkdtemp()))
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            shipper.post_json(cfg, {"events": []})
+        ctx.exception.close()
+        self.assertEqual(ctx.exception.code, 302)
+        self.assertEqual(hits, ["/api"])  # nunca se llamó a /robado con el token
 
 
 if __name__ == "__main__":

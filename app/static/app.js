@@ -10,8 +10,14 @@
     { key: "fail2ban", n: "1", unit: "baneos" },
     { key: "ufw", n: "2", unit: "paquetes" },
   ];
+  // Estado del servidor, en %: [ámbar, rojo]. Los picos cortos de CPU son normales; la RAM
+  // no cuenta la caché y el disco avisa con margen para actuar.
+  const LIMITS = { cpu: [75, 90], mem: [80, 90], disk: [80, 90] };
+  const LEVEL_TEXT = { ok: "Normal", warn: "Elevado", crit: "Crítico", none: "Sin datos" };
+  const RANGE_TEXT = { "24h": "hace 24 h", "7d": "hace 7 días", "30d": "hace 30 días" };
   const nf = new Intl.NumberFormat("es-CO");
   const dec1 = new Intl.NumberFormat("es-CO", { maximumFractionDigits: 1 });
+  const dec2 = new Intl.NumberFormat("es-CO", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const compact = { format: (v) => (Math.abs(v) >= 1e6 ? `${dec1.format(v / 1e6)} M`
     : Math.abs(v) >= 1e3 ? `${dec1.format(v / 1e3)} k` : nf.format(v)) };
   const regionNames = (() => {
@@ -72,6 +78,15 @@
     for (const m of [1, 2, 2.5, 5, 10]) if (m * exp >= v) return m * exp;
     return 10 * exp;
   };
+  const pct = (v) => (v == null ? "—" : nf.format(Math.round(v)));
+  const bytes = (b) => {
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = b;
+    let i = 0;
+    for (; v >= 1024 && i < units.length - 1; i++) v /= 1024;
+    return `${dec1.format(v >= 10 ? Math.round(v) : v)} ${units[i]}`;
+  };
+  const level = (v, [warn, crit]) => (v == null ? "none" : v >= crit ? "crit" : v >= warn ? "warn" : "ok");
 
   // ---------------------------------------------------------------- tooltip
   const tip = $("tooltip");
@@ -89,17 +104,46 @@
   };
   const hideTip = () => { tip.hidden = true; };
 
-  // Las dos gráficas comparten periodos: la hora bajo el puntero se resalta en ambas.
+  // Las gráficas de ataques y la de CPU comparten periodos: el que está bajo el puntero se
+  // resalta en todas, y el tooltip resume ese periodo.
   const bands = {};
+  let cpuSpark = null;
+  const bucketSpan = (i) => {
+    const b = data.timeline.buckets;
+    return [Date.parse(b[i].t), i + 1 < b.length ? Date.parse(b[i + 1].t) : Date.parse(data.generated_at)];
+  };
+  const bucketAt = (t) => {
+    const b = data.timeline.buckets;
+    let i = -1;
+    while (i + 1 < b.length && Date.parse(b[i + 1].t) <= t) i++;
+    return i;
+  };
   const highlight = (i) => {
     for (const list of Object.values(bands)) list.forEach((band, j) => band.classList.toggle("on", j === i));
+    cpuSpark?.band(i >= 0 && data.timeline.buckets[i] ? bucketSpan(i) : null);
   };
   const clearHover = () => { highlight(-1); hideTip(); };
-  const bucketTip = (b) => [el("strong", {}, fmtBucket(b.t)), ...SERIES.map((s) =>
-    el("span", { class: "line" }, el("span", { class: "key", "data-series": s.n }),
-       `${nf.format(b[s.key])} ${s.unit}`))];
+  const cpuIn = (i) => {
+    const [from, to] = bucketSpan(i);
+    const values = (data.server?.series.points || [])
+      .filter((p) => p.cpu != null && Date.parse(p.t) >= from && Date.parse(p.t) < to).map((p) => p.cpu);
+    return values.length ? values.reduce((a, v) => a + v, 0) / values.length : null;
+  };
+  const bucketTip = (i) => {
+    const b = data.timeline.buckets[i];
+    const lines = SERIES.map((s) => el("span", { class: "line" },
+      el("span", { class: "key", "data-series": s.n }), `${nf.format(b[s.key])} ${s.unit}`));
+    const cpu = cpuIn(i);
+    if (cpu != null) {
+      lines.push(el("span", { class: "line" },
+        el("span", { class: "key", "data-series": "cpu" }), `CPU media ${pct(cpu)} %`));
+    }
+    return [el("strong", {}, fmtBucket(b.t)), ...lines];
+  };
   // En pantallas táctiles no hay "salir" del puntero: el resaltado se quita al tocar fuera.
-  document.addEventListener("pointerdown", (evt) => { if (!evt.target.closest(".chart")) clearHover(); });
+  document.addEventListener("pointerdown", (evt) => {
+    if (!evt.target.closest(".chart, .spark")) clearHover();
+  });
   // El tooltip es fijo a la ventana: al desplazarse quedaría lejos de su barra.
   window.addEventListener("scroll", hideTip, { passive: true });
 
@@ -155,7 +199,7 @@
         svg.append(t);
       }
       const hit = svgEl("rect", { class: "hit", x: m.left + i * slot, y: m.top, width: slot, height: h + m.bottom });
-      const show = (evt) => { highlight(i); showTip(evt, bucketTip(b)); };
+      const show = (evt) => { highlight(i); showTip(evt, bucketTip(i)); };
       hit.addEventListener("pointermove", show);
       hit.addEventListener("pointerdown", show);
       hit.addEventListener("pointerleave", (evt) => { if (evt.pointerType !== "touch") clearHover(); });
@@ -173,6 +217,136 @@
                                        el("th", { scope: "col", class: "num" }, header))),
           el("tbody", {}, ...rows))
       : el("p", {}, "Sin eventos en este rango."));
+  }
+
+  // ---------------------------------------------------------------- gráfico de área (0-100 %)
+  // Eje de tiempo lineal entre `from` y `to`, el mismo rango que las gráficas de ataques.
+  function sparkChart(container, points, key, { from, to, limit, maxGap, onHover }) {
+    container.replaceChildren();
+    const pts = points.filter((p) => p[key] != null).map((p) => [Date.parse(p.t), p[key]]);
+    if (pts.length < 2) {
+      container.append(el("div", { class: "empty" }, "Aún no hay datos suficientes."));
+      return null;
+    }
+    const width = Math.max(200, container.clientWidth);
+    const height = container.clientHeight || 56;
+    const x = (t) => (((t - from) / (to - from)) * width).toFixed(1);
+    const y = (v) => (2 + (1 - Math.min(100, v) / 100) * (height - 4)).toFixed(1);
+    const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, "aria-hidden": "true" });
+    const band = svgEl("rect", { class: "hover-band", x: 0, y: 0, width: 0, height });
+    svg.append(band, svgEl("line", { class: "baseline", x1: 0, x2: width, y1: height - 0.5, y2: height - 0.5 }));
+    if (limit) svg.append(svgEl("line", { class: "limit", x1: 0, x2: width, y1: y(limit), y2: y(limit) }));
+
+    // Un hueco largo (agente parado) corta la línea en vez de unir los dos extremos.
+    const segments = [];
+    for (const p of pts) {
+      const seg = segments.at(-1);
+      if (seg && p[0] - seg.at(-1)[0] <= maxGap) seg.push(p); else segments.push([p]);
+    }
+    for (const seg of segments) {
+      const line = seg.map(([t, v], j) => `${j ? "L" : "M"}${x(t)},${y(v)}`).join(" ");
+      svg.append(svgEl("path", { class: "area", d: `${line} L${x(seg.at(-1)[0])},${height} L${x(seg[0][0])},${height} Z` }),
+                 svgEl("path", { class: "line", d: line }));
+    }
+
+    if (onHover) {
+      const hit = svgEl("rect", { class: "hit", x: 0, y: 0, width, height });
+      const at = (evt) => {
+        const r = svg.getBoundingClientRect();
+        return from + ((evt.clientX - r.left) / r.width) * (to - from);
+      };
+      const show = (evt) => onHover(evt, at(evt));
+      hit.addEventListener("pointermove", show);
+      hit.addEventListener("pointerdown", show);
+      hit.addEventListener("pointerleave", (evt) => { if (evt.pointerType !== "touch") clearHover(); });
+      svg.append(hit);
+    }
+    container.append(svg);
+    return {
+      band(span) {
+        band.classList.toggle("on", Boolean(span));
+        if (!span) return;
+        const a = Math.max(0, Number(x(span[0])));
+        band.setAttribute("x", a);
+        band.setAttribute("width", Math.max(1, Math.min(width, Number(x(span[1]))) - a));
+      },
+    };
+  }
+
+  // ---------------------------------------------------------------- estado del servidor
+  function renderServer(d) {
+    const s = d.server;
+    const host = s?.host || {};
+    $("server-title").textContent = host.label || "Servidor";
+    $("server-wait").hidden = Boolean(s);
+    $("gauges").hidden = !s;
+    const facts = [["Hostname", host.hostname], ["Sistema operativo", host.os], ["Kernel", host.kernel],
+                   ["Servicio", host.service], ["IPv4", host.ipv4], ["IPv6", host.ipv6]];
+    $("server-facts").replaceChildren(...facts.filter(([, v]) => v).map(([k, v]) =>
+      el("div", {}, el("dt", {}, k), el("dd", {}, v))));
+    cpuSpark = null;
+
+    const pill = $("server-pill");
+    const setPill = (lvl, text) => { pill.dataset.level = lvl; $("server-pill-text").textContent = text; };
+    if (!s) {
+      setPill("none", "Esperando métricas");
+      return;
+    }
+
+    const L = s.latest;
+    const sum = s.summary;
+    const values = { cpu: L.cpu_pct, mem: (100 * L.mem_used) / L.mem_total,
+                     disk: (100 * L.disk_used) / (L.disk_used + L.disk_avail || 1) };
+    const levels = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, level(v, LIMITS[k])]));
+    const worst = ["crit", "warn"].find((l) => Object.values(levels).includes(l));
+    const online = Boolean(s.last_seen) && Date.now() - Date.parse(s.last_seen) <= LIVE_MS;
+    if (!online) setPill("crit", `Sin señal · ${ago(s.last_seen)}`);
+    else if (worst === "crit") setPill("crit", "Uso crítico");
+    else if (worst === "warn") setPill("warn", "Uso elevado");
+    else setPill("ok", "En línea");
+
+    const growth = sum.disk_growth;
+    const lines = {
+      cpu: [
+        L.cpu_pct == null ? "Primera lectura: el uso llega en la próxima (2 min)"
+          : `Disponible ${pct(100 - L.cpu_pct)} %`,
+        L.load ? `Carga ${L.load.map((v) => dec2.format(v)).join(" · ")}` : "",
+        sum.cpu_max == null ? "" : `Pico ${pct(sum.cpu_max)} % · Promedio ${pct(sum.cpu_avg)} %`,
+      ],
+      mem: [
+        `${bytes(L.mem_used)} de ${bytes(L.mem_total)}`,
+        L.swap_total ? `Swap ${bytes(L.swap_used)} de ${bytes(L.swap_total)}` : "Sin swap",
+        `Pico ${pct(sum.mem_max)} % · Promedio ${pct(sum.mem_avg)} %`,
+      ],
+      disk: [
+        `${bytes(L.disk_used)} de ${bytes(L.disk_total)} · ${bytes(L.disk_avail)} libres`,
+        growth == null ? "" : `Crecimiento en el rango: ${growth < 0 ? "−" : "+"}${bytes(Math.abs(growth))}`,
+      ],
+    };
+
+    const buckets = d.timeline.buckets;
+    const span = { from: buckets.length ? Date.parse(buckets[0].t) : Date.parse(d.generated_at) - 864e5,
+                   to: Date.parse(d.generated_at),
+                   maxGap: s.series.unit === "raw" ? 10 * 60_000 : 150 * 60_000 };
+    for (const [metric, value] of Object.entries(values)) {
+      const g = document.querySelector(`.gauge[data-metric="${metric}"]`);
+      g.dataset.level = levels[metric];
+      g.querySelector(".gauge-level").textContent = LEVEL_TEXT[levels[metric]];
+      g.querySelector(".num").textContent = pct(value);
+      g.querySelector(".meter-fill").style.width = `${value == null ? 0 : Math.min(100, value)}%`;
+      g.querySelector(".spark-from").textContent = RANGE_TEXT[d.range] || "";
+      g.querySelectorAll(".gauge-detail").forEach((p, j) => { p.textContent = lines[metric][j] || ""; });
+      const chart = sparkChart(g.querySelector(".spark"), s.series.points, metric, {
+        ...span, limit: LIMITS[metric][0],
+        onHover: metric === "cpu" && buckets.length ? (evt, t) => {
+          const i = bucketAt(t);
+          if (i < 0) { clearHover(); return; }
+          highlight(i);
+          showTip(evt, bucketTip(i));
+        } : null,
+      });
+      if (metric === "cpu") cpuSpark = chart;
+    }
   }
 
   // ---------------------------------------------------------------- listas
@@ -217,6 +391,7 @@
     barChart($("chart-ufw"), b, "ufw", "bar-2");
     dataTable($("table-f2b"), b, "fail2ban", "Baneos");
     dataTable($("table-ufw"), b, "ufw", "Paquetes");
+    renderServer(d);
 
     const countries = $("countries");
     countries.classList.add("series-3");

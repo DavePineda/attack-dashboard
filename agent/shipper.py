@@ -8,6 +8,8 @@
 - UFW se agrega por (ventana, IP, protocolo, puerto) para no inundar la base: solo se
   envían ventanas ya cerradas, así un reenvío nunca produce conteos parciales.
 - Soporta rotación de logs (lee el resto de <log>.1 antes de empezar el archivo nuevo).
+- Envía también el estado del servidor (CPU, carga, RAM, swap y disco /) y sus datos
+  básicos (hostname, sistema, kernel, IPs) para la tarjeta del servidor del dashboard.
 """
 from __future__ import annotations
 
@@ -15,7 +17,9 @@ import ipaddress
 import json
 import logging
 import os
+import platform
 import re
+import socket
 import sys
 import urllib.error
 import urllib.request
@@ -23,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 MAX_READ_BYTES = 64 * 1024 * 1024  # por archivo y ejecución
 
 log = logging.getLogger("attack-shipper")
@@ -37,6 +41,9 @@ F2B_RE = re.compile(
 SYSLOG_TS_RE = re.compile(
     r"^(?:(?P<iso>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))"
     r"|(?P<bsd>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}))\s")
+# Tras la fecha: "<host> kernel: ". Cualquier usuario puede escribir "[UFW BLOCK]" en syslog
+# con `logger`; esas líneas llevan otra etiqueta y se descartan.
+KERNEL_TAG_RE = re.compile(r"\S+\s+kernel:\s")
 KV_RE = re.compile(r"\b([A-Z]+)=(\S*)")
 MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
@@ -54,6 +61,12 @@ class Config:
     max_batch: int = 1000
     timeout: int = 20
     ignore_nets: list = field(default_factory=list)
+    metrics: bool = True
+    host_label: str = ""
+    host_service: str = ""
+    proc_dir: Path = Path("/proc")
+    disk_path: str = "/"
+    os_release: Path = Path("/etc/os-release")
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,6 +92,9 @@ class Config:
             max_batch=min(int(env.get("SHIPPER_MAX_BATCH", "1000")), 2000),
             timeout=int(env.get("SHIPPER_TIMEOUT", "20")),
             ignore_nets=nets,
+            metrics=env.get("SHIPPER_METRICS", "1") != "0",
+            host_label=env.get("SHIPPER_HOST_LABEL", "").strip()[:60],
+            host_service=env.get("SHIPPER_HOST_SERVICE", "").strip()[:60],
         )
 
 
@@ -125,6 +141,9 @@ def parse_syslog_ts(line: str, now: datetime) -> datetime | None:
 
 def parse_ufw(line: str, now: datetime, ignore: list) -> dict | None:
     if "[UFW BLOCK]" not in line:
+        return None
+    m = SYSLOG_TS_RE.match(line)
+    if not m or not KERNEL_TAG_RE.match(line, m.end()):
         return None
     ts = parse_syslog_ts(line, now)
     if ts is None:
@@ -214,7 +233,115 @@ class LogSource:
         return out + lines, new
 
 
+# ---------------------------------------------------------------- estado del servidor
+def read_cpu(proc: Path) -> tuple[int, int] | None:
+    """(total, inactivo) acumulados desde el arranque, de la primera línea de /proc/stat."""
+    try:
+        fields = (proc / "stat").read_text().splitlines()[0].split()
+        # user nice system idle iowait irq softirq steal (guest ya va dentro de user/nice)
+        values = [int(v) for v in fields[1:9]]
+    except (OSError, IndexError, ValueError):
+        return None
+    if fields[0] != "cpu" or len(values) < 5:
+        return None
+    return sum(values), values[3] + values[4]
+
+
+def cpu_percent(prev, cur) -> float | None:
+    """Uso medio entre dos lecturas: el agente corre cada 2 min, así que es la media de 2 min."""
+    if not prev or not cur:
+        return None
+    total, idle = cur[0] - prev[0], cur[1] - prev[1]
+    if total <= 0 or idle < 0:  # el servidor se reinició entre lecturas
+        return None
+    return round(100 * (total - idle) / total, 1)
+
+
+def read_load(proc: Path) -> list[float] | None:
+    try:
+        return [float(v) for v in (proc / "loadavg").read_text().split()[:3]]
+    except (OSError, ValueError):
+        return None
+
+
+def read_memory(proc: Path) -> dict | None:
+    """RAM usada = total - disponible: la caché que Linux libera cuando hace falta no cuenta."""
+    try:
+        kib = {}
+        for line in (proc / "meminfo").read_text().splitlines():
+            key, _, rest = line.partition(":")
+            if rest.split():
+                kib[key] = int(rest.split()[0])
+        total, avail = kib["MemTotal"] * 1024, kib["MemAvailable"] * 1024
+        swap_total, swap_free = kib.get("SwapTotal", 0) * 1024, kib.get("SwapFree", 0) * 1024
+    except (OSError, KeyError, ValueError):
+        return None
+    return {"mem_total": total, "mem_used": total - avail,
+            "swap_total": swap_total, "swap_used": swap_total - swap_free}
+
+
+def read_disk(path: str) -> dict | None:
+    """Mismo criterio que `df`: tamaño, usado y libre para usuarios normales."""
+    try:
+        st = os.statvfs(path)
+    except (OSError, AttributeError):  # AttributeError: statvfs no existe fuera de Unix
+        return None
+    return {"disk_total": st.f_blocks * st.f_frsize,
+            "disk_used": (st.f_blocks - st.f_bfree) * st.f_frsize,
+            "disk_avail": st.f_bavail * st.f_frsize}
+
+
+def os_name(path: Path) -> str | None:
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"') or None
+    except OSError:
+        pass
+    return None
+
+
+def source_ip(family: int, target: str) -> str | None:
+    """IP pública con la que este servidor sale a internet. Un socket UDP "conectado" solo
+    elige la ruta: no envía ningún paquete."""
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as s:
+            s.connect((target, 53))
+            return public_ip(s.getsockname()[0], [])
+    except OSError:
+        return None
+
+
+def collect_metrics(cfg: Config, state: dict, now: datetime) -> tuple[dict | None, tuple | None]:
+    """Devuelve (métricas o None si no se pudieron leer, contadores de CPU para la próxima vez)."""
+    cpu = read_cpu(cfg.proc_dir)
+    memory, disk = read_memory(cfg.proc_dir), read_disk(cfg.disk_path)
+    if not memory or not disk:
+        return None, cpu
+    return {"ts": now.isoformat().replace("+00:00", "Z"),
+            "cpu_pct": cpu_percent(state.get("cpu"), cpu),
+            "load": read_load(cfg.proc_dir), **memory, **disk}, cpu
+
+
+def host_info(cfg: Config) -> dict:
+    return {"label": cfg.host_label or None, "service": cfg.host_service or None,
+            "hostname": socket.getfqdn() or None, "os": os_name(cfg.os_release),
+            "kernel": f"{platform.system()} {platform.release()}".strip() or None,
+            "ipv4": source_ip(socket.AF_INET, "1.1.1.1"),
+            "ipv6": source_ip(socket.AF_INET6, "2606:4700:4700::1111")}
+
+
 # ---------------------------------------------------------------- envío
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Un 3xx es un error: seguirlo reenviaría el token a la URL que diga la respuesta."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 def post_json(cfg: Config, payload: dict) -> dict:
     data = json.dumps(payload, separators=(",", ":")).encode()
     req = urllib.request.Request(cfg.endpoint, data=data, method="POST", headers={
@@ -222,7 +349,7 @@ def post_json(cfg: Config, payload: dict) -> dict:
         "Content-Type": "application/json",
         "User-Agent": f"attack-shipper/{VERSION}",
     })
-    with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+    with OPENER.open(req, timeout=cfg.timeout) as resp:
         return json.loads(resp.read() or b"{}")
 
 
@@ -283,13 +410,23 @@ def run(cfg: Config, now: datetime | None = None, sender=post_json) -> int:
     state_file = cfg.state_dir / "state.json"
     state = load_state(state_file)
     events, new_state = collect(cfg, state, now)
+    extra: dict = {}
+    if cfg.metrics:
+        metrics, cpu = collect_metrics(cfg, state, now)
+        if cpu:
+            new_state["cpu"] = list(cpu)
+        extra["host"] = host_info(cfg)
+        if metrics:
+            extra["metrics"] = metrics
 
     totals = {"accepted": 0, "inserted": 0, "rejected": 0}
     # Siempre al menos un envío (aunque vacío): valida el token y actualiza last_seen,
     # así el dashboard sabe que el agente sigue vivo aunque no haya ataques nuevos.
+    # El estado del servidor viaja una sola vez por ejecución, en el primer lote.
     for i in range(0, max(len(events), 1), cfg.max_batch):
+        payload = {"events": events[i:i + cfg.max_batch], **(extra if i == 0 else {})}
         try:
-            result = sender(cfg, {"events": events[i:i + cfg.max_batch]})
+            result = sender(cfg, payload)
         except urllib.error.HTTPError as exc:
             log.error("La API respondió %s: %s", exc.code, exc.read()[:300].decode("utf-8", "replace"))
             return 1

@@ -20,7 +20,7 @@ from starlette.staticfiles import StaticFiles
 
 from .config import Settings
 from .geo import CountryLookup
-from .ingest import BadRequest, parse_batch
+from .ingest import BadRequest, parse_batch, parse_host, parse_metrics
 from .store import Store
 
 log = logging.getLogger("web")
@@ -142,6 +142,39 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if value else None
 
 
+def _round(value: float | None, digits: int = 1) -> float | None:
+    return None if value is None else round(float(value), digits)
+
+
+def build_server(raw: dict | None) -> dict[str, Any] | None:
+    """Bloque "server" de /api/v1/stats: última lectura, serie del rango y resumen."""
+    if not raw:
+        return None
+    last, summary = raw["latest"], raw["summary"]
+    host = last["host_info"] or {}
+    disk_growth = (None if summary["disk_first"] is None
+                   else summary["disk_last"] - summary["disk_first"])
+    return {
+        "name": last["name"],
+        "last_seen": _iso(last["last_seen"]),
+        "host": {k: host.get(k) for k in
+                 ("label", "service", "hostname", "os", "kernel", "ipv4", "ipv6")},
+        "latest": {
+            "ts": _iso(last["ts"]), "cpu_pct": _round(last["cpu_pct"]),
+            "load": (None if last["load1"] is None else
+                     [_round(last[k], 2) for k in ("load1", "load5", "load15")]),
+            **{k: int(last[k]) for k in ("mem_total", "mem_used", "swap_total", "swap_used",
+                                         "disk_total", "disk_used", "disk_avail")},
+        },
+        "series": {"unit": raw["series_unit"], "points": [
+            {"t": _iso(p["t"]), "cpu": _round(p["cpu"]), "mem": _round(p["mem"]),
+             "disk": _round(p["disk"])} for p in raw["series"]]},
+        "summary": {"cpu_max": _round(summary["cpu_max"]), "cpu_avg": _round(summary["cpu_avg"]),
+                    "mem_max": _round(summary["mem_max"]), "mem_avg": _round(summary["mem_avg"]),
+                    "disk_growth": disk_growth},
+    }
+
+
 def build_timeline(rows: list[dict], *, since: datetime, now: datetime, unit: str,
                    tz) -> list[dict[str, Any]]:
     """Rellena los huecos para que el gráfico muestre también las horas/días sin eventos."""
@@ -234,24 +267,38 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
 
         if "application/json" not in request.headers.get("content-type", ""):
             return error(415, "Se esperaba application/json")
+        now = datetime.now(timezone.utc)
         try:
             body = await read_body(request)
             payload = json.loads(body)
             events, rejected = parse_batch(
-                payload, now=datetime.now(timezone.utc),
+                payload, now=now,
                 retention_days=settings.retention_days, max_events=settings.max_batch)
         except BadRequest as exc:
             return error(413 if "grande" in str(exc) else 400, str(exc))
         except (ValueError, UnicodeDecodeError):
             return error(400, "JSON inválido")
 
+        # Estado del servidor (agente 1.1+). Si no sirve se descarta, pero los eventos se guardan.
+        metrics, host = None, None
+        if payload.get("metrics") is not None:
+            try:
+                metrics = parse_metrics(payload["metrics"], now=now)
+            except (ValueError, TypeError) as exc:
+                log.warning("Sensor %s: estado del servidor descartado (%s)", sensor[1], exc)
+        if payload.get("host") is not None:
+            host = parse_host(payload["host"])
+
         countries = [geo.country(e.ip) for e in events]
-        inserted = await store.insert_events(sensor[0], events, countries)
+        inserted = await store.insert_events(sensor[0], events, countries,
+                                             metrics=metrics, host=host)
         stats_cache.clear()
-        log.info("Sensor %s: %d recibidos, %d nuevos, %d rechazados",
-                 sensor[1], len(events), inserted, rejected)
+        log.info("Sensor %s: %d recibidos, %d nuevos, %d rechazados%s",
+                 sensor[1], len(events), inserted, rejected,
+                 " · estado del servidor" if metrics else "")
         return JSONResponse({"accepted": len(events), "inserted": inserted,
-                             "duplicates": len(events) - inserted, "rejected": rejected})
+                             "duplicates": len(events) - inserted, "rejected": rejected,
+                             "metrics": metrics is not None})
 
     async def stats(request: Request) -> Response:
         if not stats_limiter.allow(client_ip(request)):
@@ -317,6 +364,7 @@ def create_app(settings: Settings, store: Store, geo: CountryLookup | None = Non
                     for r in raw["top"]],
             "sensors": {"count": int(raw["sensors"]["count"] or 0),
                         "last_seen": _iso(raw["sensors"]["last_seen"])},
+            "server": build_server(raw.get("server")),
         }
 
     async def retention_loop() -> None:

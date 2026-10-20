@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from .ingest import Event
+from .ingest import Event, Metrics
 
 log = logging.getLogger("store")
 SCHEMA = (Path(__file__).parent / "schema.sql").read_text(encoding="utf-8")
@@ -104,6 +104,57 @@ SELECT count(*) FILTER (WHERE enabled) AS count, max(last_seen) AS last_seen FRO
 """
 
 SQL_PURGE = "DELETE FROM events WHERE ts < now() - make_interval(days => %(days)s)"
+SQL_PURGE_METRICS = "DELETE FROM metrics WHERE ts < now() - make_interval(days => %(days)s)"
+
+SQL_INSERT_METRICS = """
+INSERT INTO metrics (sensor_id, ts, cpu_pct, load1, load5, load15, mem_total, mem_used,
+                     swap_total, swap_used, disk_total, disk_used, disk_avail)
+VALUES (%(sensor_id)s, %(ts)s, %(cpu_pct)s, %(load1)s, %(load5)s, %(load15)s, %(mem_total)s,
+        %(mem_used)s, %(swap_total)s, %(swap_used)s, %(disk_total)s, %(disk_used)s, %(disk_avail)s)
+ON CONFLICT DO NOTHING
+"""
+
+SQL_SET_HOST = "UPDATE sensors SET host_info = %(host)s::jsonb WHERE id = %(id)s"
+
+# Estado del servidor: el sensor que envió las métricas más recientes (hoy solo hay uno).
+SQL_SERVER_LATEST = """
+SELECT s.id AS sensor_id, s.name, s.last_seen, s.host_info, m.ts, m.cpu_pct,
+       m.load1, m.load5, m.load15, m.mem_total, m.mem_used, m.swap_total, m.swap_used,
+       m.disk_total, m.disk_used, m.disk_avail
+FROM metrics m JOIN sensors s ON s.id = m.sensor_id
+ORDER BY m.ts DESC
+LIMIT 1
+"""
+
+# Disco en % como `df`: usado / (usado + libre para usuarios); el reservado para root no cuenta.
+SQL_SERVER_SERIES_RAW = """
+SELECT ts AS t, cpu_pct AS cpu,
+       100 * mem_used::float8 / mem_total AS mem,
+       100 * disk_used::float8 / NULLIF(disk_used + disk_avail, 0) AS disk
+FROM metrics
+WHERE sensor_id = %(sid)s AND ts >= %(since)s
+ORDER BY ts
+"""
+
+SQL_SERVER_SERIES_HOURLY = """
+SELECT date_trunc('hour', ts, %(tz)s) AS t, avg(cpu_pct) AS cpu,
+       avg(100 * mem_used::float8 / mem_total) AS mem,
+       avg(100 * disk_used::float8 / NULLIF(disk_used + disk_avail, 0)) AS disk
+FROM metrics
+WHERE sensor_id = %(sid)s AND ts >= %(since)s
+GROUP BY 1
+ORDER BY 1
+"""
+
+SQL_SERVER_SUMMARY = """
+SELECT max(cpu_pct) AS cpu_max, avg(cpu_pct) AS cpu_avg,
+       max(100 * mem_used::float8 / mem_total) AS mem_max,
+       avg(100 * mem_used::float8 / mem_total) AS mem_avg,
+       (array_agg(disk_used ORDER BY ts))[1]      AS disk_first,
+       (array_agg(disk_used ORDER BY ts DESC))[1] AS disk_last
+FROM metrics
+WHERE sensor_id = %(sid)s AND ts >= %(since)s
+"""
 
 # Si la red entre el nodo de la API y el de la base se corta, una conexión muerta solo se
 # detecta con los temporizadores TCP del sistema (pueden ser horas) y la consulta que la usa
@@ -184,7 +235,8 @@ class Store(Protocol):
     async def close(self) -> None: ...
     async def sensor_for_token(self, sha256: bytes) -> tuple[int, str] | None: ...
     async def insert_events(self, sensor_id: int, events: list[Event],
-                            countries: list[str | None]) -> int: ...
+                            countries: list[str | None], *, metrics: Metrics | None = None,
+                            host: dict | None = None) -> int: ...
     async def stats(self, *, since: datetime, unit: str, tz: str, mask: bool) -> dict[str, Any]: ...
     async def purge(self, retention_days: int) -> int: ...
 
@@ -251,7 +303,8 @@ class PgStore:
         return (row["id"], row["name"]) if row else None
 
     async def insert_events(self, sensor_id: int, events: list[Event],
-                            countries: list[str | None]) -> int:
+                            countries: list[str | None], *, metrics: Metrics | None = None,
+                            host: dict | None = None) -> int:
         async with self._pool.connection() as conn:
             async with conn.transaction():
                 inserted = 0
@@ -259,6 +312,17 @@ class PgStore:
                     cur = await conn.execute(SQL_INSERT_EVENTS, {
                         "sensor_id": sensor_id, "rows": events_to_json(events, countries)})
                     inserted = cur.rowcount
+                if metrics:
+                    load = metrics.load or (None, None, None)
+                    await conn.execute(SQL_INSERT_METRICS, {
+                        "sensor_id": sensor_id, "ts": metrics.ts, "cpu_pct": metrics.cpu_pct,
+                        "load1": load[0], "load5": load[1], "load15": load[2],
+                        "mem_total": metrics.mem_total, "mem_used": metrics.mem_used,
+                        "swap_total": metrics.swap_total, "swap_used": metrics.swap_used,
+                        "disk_total": metrics.disk_total, "disk_used": metrics.disk_used,
+                        "disk_avail": metrics.disk_avail})
+                if host:
+                    await conn.execute(SQL_SET_HOST, {"id": sensor_id, "host": json.dumps(host)})
                 await conn.execute(SQL_TOUCH_SENSOR, {"id": sensor_id})
         return inserted
 
@@ -277,9 +341,24 @@ class PgStore:
             ):
                 cur = await conn.execute(sql, params)
                 out[key] = await cur.fetchone() if one else await cur.fetchall()
+
+            out["server"] = None
+            cur = await conn.execute(SQL_SERVER_LATEST)
+            latest = await cur.fetchone()
+            if latest:
+                # 24 h: un punto por ejecución del agente; 7 y 30 días: medias por hora.
+                params["sid"] = latest["sensor_id"]
+                series_sql = SQL_SERVER_SERIES_RAW if unit == "hour" else SQL_SERVER_SERIES_HOURLY
+                cur = await conn.execute(series_sql, params)
+                series = await cur.fetchall()
+                cur = await conn.execute(SQL_SERVER_SUMMARY, params)
+                out["server"] = {"latest": latest, "series": series,
+                                 "series_unit": "raw" if unit == "hour" else "hour",
+                                 "summary": await cur.fetchone()}
         return out
 
     async def purge(self, retention_days: int) -> int:
         async with self._pool.connection() as conn:
+            await conn.execute(SQL_PURGE_METRICS, {"days": retention_days})
             cur = await conn.execute(SQL_PURGE, {"days": retention_days})
             return cur.rowcount
