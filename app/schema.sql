@@ -32,3 +32,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_dedup_idx ON events (
 );
 CREATE INDEX IF NOT EXISTS events_ts_idx        ON events (ts);
 CREATE INDEX IF NOT EXISTS events_source_ts_idx ON events (source, ts);
+
+-- Cabecera de la tarjeta del servidor (hostname, sistema, kernel, IPs): la última que envió.
+ALTER TABLE sensors ADD COLUMN IF NOT EXISTS host_info JSONB;
+
+-- Estado del servidor: una fila por ejecución del agente (cada 2 min). Bytes en BIGINT.
+CREATE TABLE IF NOT EXISTS metrics (
+    sensor_id   INT         NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+    ts          TIMESTAMPTZ NOT NULL,
+    cpu_pct     REAL        CHECK (cpu_pct BETWEEN 0 AND 100),  -- NULL en la 1.ª lectura
+    load1       REAL        CHECK (load1 >= 0),
+    load5       REAL        CHECK (load5 >= 0),
+    load15      REAL        CHECK (load15 >= 0),
+    mem_total   BIGINT      NOT NULL CHECK (mem_total > 0),
+    mem_used    BIGINT      NOT NULL CHECK (mem_used >= 0),
+    swap_total  BIGINT      NOT NULL CHECK (swap_total >= 0),
+    swap_used   BIGINT      NOT NULL CHECK (swap_used >= 0),
+    disk_total  BIGINT      NOT NULL CHECK (disk_total > 0),
+    disk_used   BIGINT      NOT NULL CHECK (disk_used >= 0),
+    disk_avail  BIGINT      NOT NULL CHECK (disk_avail >= 0),
+    PRIMARY KEY (sensor_id, ts),
+    CHECK (mem_used <= mem_total AND swap_used <= swap_total
+           AND disk_used <= disk_total AND disk_avail <= disk_total)
+);
+CREATE INDEX IF NOT EXISTS metrics_ts_idx ON metrics (ts);

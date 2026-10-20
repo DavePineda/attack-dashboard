@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ataques a 0r1sk.xyz</title>
-  <meta name="description" content="Telemetría en vivo de los ataques que bloquean Fail2ban y UFW en mis servidores.">
+  <title>0r1sk.xyz</title>
+  <meta name="description" content="Estado de mi servidor de correo y telemetría en vivo de los ataques que bloquean Fail2ban y UFW.">
   <meta name="color-scheme" content="dark light">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
@@ -17,8 +17,8 @@
       <div class="brand">
         <span class="pulse" aria-hidden="true"></span>
         <div>
-          <h1 id="title">Ataques a 0r1sk.xyz</h1>
-          <p class="sub">Lo que Fail2ban y UFW bloquean en mis servidores, en vivo.</p>
+          <h1 id="title">0r1sk.xyz</h1>
+          <p class="sub">Estado del servidor y ataques que bloquean Fail2ban y UFW, en vivo.</p>
         </div>
       </div>
       <div class="controls">
@@ -33,6 +33,55 @@
   </header>
 
   <main id="main" class="wrap">
+    <section class="card server" aria-labelledby="server-title">
+      <header class="server-head">
+        <h2 id="server-title">Servidor</h2>
+        <dl class="facts" id="server-facts"></dl>
+        <p class="pill" id="server-pill" data-level="none"><span class="pill-dot" aria-hidden="true"></span><span id="server-pill-text">Cargando…</span></p>
+      </header>
+      <p class="server-wait" id="server-wait" hidden>Esperando las primeras métricas del agente. Llegan cada 2 minutos.</p>
+      <div class="gauges" id="gauges">
+        <article class="gauge" data-metric="cpu" data-level="none">
+          <header class="gauge-head">
+            <h3><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5"/></svg>CPU</h3>
+            <span class="gauge-level"></span>
+          </header>
+          <p class="gauge-value"><span class="num">—</span><span class="unit">%</span></p>
+          <div class="meter"><div class="meter-fill"></div></div>
+          <div class="spark" role="img" aria-label="Uso de CPU en el rango"></div>
+          <p class="spark-axis"><span class="spark-from">hace 24 h</span><span>ahora</span></p>
+          <p class="gauge-detail"></p>
+          <p class="gauge-detail"></p>
+          <p class="gauge-detail"></p>
+        </article>
+        <article class="gauge" data-metric="mem" data-level="none">
+          <header class="gauge-head">
+            <h3><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4" width="13" height="6.5" rx="1"/><path d="M4 10.5V13M8 10.5V13M12 10.5V13M4.5 6.5v1.5M7 6.5v1.5M9 6.5v1.5M11.5 6.5v1.5"/></svg>Memoria RAM</h3>
+            <span class="gauge-level"></span>
+          </header>
+          <p class="gauge-value"><span class="num">—</span><span class="unit">%</span></p>
+          <div class="meter"><div class="meter-fill"></div></div>
+          <div class="spark" role="img" aria-label="Uso de memoria RAM en el rango"></div>
+          <p class="spark-axis"><span class="spark-from">hace 24 h</span><span>ahora</span></p>
+          <p class="gauge-detail"></p>
+          <p class="gauge-detail"></p>
+          <p class="gauge-detail"></p>
+        </article>
+        <article class="gauge" data-metric="disk" data-level="none">
+          <header class="gauge-head">
+            <h3><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="3.75" rx="5.5" ry="2"/><path d="M2.5 3.75v8.5c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2v-8.5M2.5 8c0 1.1 2.46 2 5.5 2s5.5-.9 5.5-2"/></svg>Disco duro</h3>
+            <span class="gauge-level"></span>
+          </header>
+          <p class="gauge-value"><span class="num">—</span><span class="unit">%</span></p>
+          <div class="meter"><div class="meter-fill"></div></div>
+          <div class="spark" role="img" aria-label="Uso del disco en el rango"></div>
+          <p class="spark-axis"><span class="spark-from">hace 24 h</span><span>ahora</span></p>
+          <p class="gauge-detail"></p>
+          <p class="gauge-detail"></p>
+        </article>
+      </div>
+    </section>
+
     <section class="kpis" aria-label="Resumen">
       <article class="kpi">
         <h2>Baneos</h2>

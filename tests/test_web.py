@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn  # noqa: E402
 
 from app.config import Settings  # noqa: E402
-from app.web import create_app  # noqa: E402
+from app.web import build_server, create_app  # noqa: E402
 
 TOKEN = "k" * 43
 
@@ -30,6 +30,8 @@ class FakeStore:
     def __init__(self):
         self.events = []
         self.keys = set()
+        self.metrics = []
+        self.host = None
 
     async def open(self): ...
     async def close(self): ...
@@ -38,7 +40,11 @@ class FakeStore:
     async def sensor_for_token(self, sha):
         return (1, "vps-prueba") if sha == hashlib.sha256(TOKEN.encode()).digest() else None
 
-    async def insert_events(self, sensor_id, events, countries):
+    async def insert_events(self, sensor_id, events, countries, *, metrics=None, host=None):
+        if metrics:
+            self.metrics.append(metrics)
+        if host:
+            self.host = host
         new = 0
         for e in events:
             key = (sensor_id, e.source, e.ts, e.ip, e.jail, e.proto, e.dport)
@@ -133,6 +139,36 @@ class WebTests(unittest.TestCase):
         status, _, body = self.req("/api/v1/ingest", batch)
         self.assertEqual((body["inserted"], body["duplicates"]), (0, 2))
 
+    def server_state(self, **kw):
+        base = {"ts": datetime.now(timezone.utc).isoformat(), "cpu_pct": 12.5,
+                "load": [0.1, 0.2, 0.3], "mem_total": 2_000, "mem_used": 1_000,
+                "swap_total": 0, "swap_used": 0,
+                "disk_total": 40_000, "disk_used": 14_000, "disk_avail": 24_000}
+        base.update(kw)
+        return base
+
+    def test_ingest_with_server_state(self):
+        self.store.metrics.clear()
+        body = {"events": [self.ev(ip="45.33.32.20")], "metrics": self.server_state(),
+                "host": {"hostname": "mail.example.com", "ipv4": "10.0.0.1"}}
+        status, _, resp = self.req("/api/v1/ingest", body)
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["metrics"])
+        self.assertEqual(self.store.metrics[-1].cpu_pct, 12.5)
+        self.assertEqual(self.store.host["hostname"], "mail.example.com")
+        self.assertIsNone(self.store.host["ipv4"])  # privada: no se guarda
+
+    def test_bad_server_state_keeps_the_events(self):
+        self.store.metrics.clear()
+        body = {"events": [self.ev(ip="45.33.32.21")], "metrics": self.server_state(cpu_pct=250)}
+        status, _, resp = self.req("/api/v1/ingest", body)
+        self.assertEqual(status, 200)
+        self.assertEqual((resp["accepted"], resp["metrics"]), (1, False))
+        self.assertEqual(self.store.metrics, [])
+        # Un agente antiguo (sin "metrics") sigue funcionando igual.
+        status, _, resp = self.req("/api/v1/ingest", {"events": []})
+        self.assertEqual((status, resp["metrics"]), (200, False))
+
     def test_rejects_malformed_bodies(self):
         self.assertEqual(self.req("/api/v1/ingest", raw=b"{nope")[0], 400)
         self.assertEqual(self.req("/api/v1/ingest", raw=b"[]")[0], 400)
@@ -148,6 +184,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("server", {k.lower() for k in headers})
         self.assertEqual(len(body["timeline"]["buckets"]), 25)
         self.assertEqual(body["geoip_attribution_url"], "")  # sin GeoIP no hay atribución
+        self.assertIsNone(body["server"])  # aún sin estado del servidor
         self.assertEqual(self.req("/api/v1/stats?range=1y", token=None)[0], 400)
 
     def test_static_index(self):
@@ -243,6 +280,37 @@ class ProxyOnlyTests(unittest.TestCase):
                 Settings.from_env()
         finally:
             del os.environ["TRUSTED_PROXIES"]
+
+
+class BuildServerTests(unittest.TestCase):
+    def test_server_block(self):
+        ts = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
+        raw = {
+            "latest": {"name": "vps-correo", "last_seen": ts, "ts": ts,
+                       "host_info": {"hostname": "mail.example.com", "otro": "x"},
+                       "cpu_pct": 18.04, "load1": 0.424, "load5": 0.38, "load15": 0.35,
+                       "mem_total": 2_000, "mem_used": 1_300, "swap_total": 0, "swap_used": 0,
+                       "disk_total": 40_000, "disk_used": 14_000, "disk_avail": 24_000},
+            "series": [{"t": ts, "cpu": 18.04, "mem": 65.0, "disk": 36.84}],
+            "series_unit": "raw",
+            "summary": {"cpu_max": 58.0, "cpu_avg": 24.33, "mem_max": 73.0, "mem_avg": 65.0,
+                        "disk_first": 13_600, "disk_last": 14_000},
+        }
+        block = build_server(raw)
+        self.assertEqual(block["host"]["hostname"], "mail.example.com")
+        self.assertNotIn("otro", block["host"])
+        self.assertEqual(block["latest"]["cpu_pct"], 18.0)
+        self.assertEqual(block["latest"]["load"], [0.42, 0.38, 0.35])
+        self.assertEqual(block["series"]["points"][0]["disk"], 36.8)
+        self.assertEqual(block["summary"]["disk_growth"], 400)
+        self.assertIsNone(build_server(None))
+
+        raw["latest"]["load1"] = raw["latest"]["cpu_pct"] = None  # primera lectura del agente
+        raw["summary"]["disk_first"] = None
+        block = build_server(raw)
+        self.assertIsNone(block["latest"]["load"])
+        self.assertIsNone(block["latest"]["cpu_pct"])
+        self.assertIsNone(block["summary"]["disk_growth"])
 
 
 if __name__ == "__main__":

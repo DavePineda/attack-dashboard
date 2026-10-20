@@ -110,7 +110,7 @@ class Settings:
             client_ip_header=os.environ.get("CLIENT_IP_HEADER", "").strip().lower(),
             trusted_proxies=_networks("TRUSTED_PROXIES"),
             display_tz=ZoneInfo(os.environ.get("DISPLAY_TZ", "America/Bogota")),
-            site_title=os.environ.get("SITE_TITLE", "Ataques a 0r1sk.xyz").strip()[:80],
+            site_title=os.environ.get("SITE_TITLE", "0r1sk.xyz").strip()[:80],
             source_url=_https_url(os.environ.get("SOURCE_URL", "")),
             geoip_attribution=os.environ.get(
                 "GEOIP_ATTRIBUTION", "Geolocalización por país: DB-IP.com (CC BY 4.0)").strip()[:200],

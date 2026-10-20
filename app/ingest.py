@@ -11,6 +11,10 @@ JAIL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PROTO_RE = re.compile(r"^[A-Z0-9]{1,10}$")
 MAX_HITS = 10_000_000
 FUTURE_SKEW = timedelta(minutes=10)
+MAX_BYTES = 1 << 50          # 1 PiB: cualquier valor mayor es un error del agente
+MAX_LOAD = 10_000.0
+HOST_TEXT_RE = re.compile(r"^[\w .,:()+/-]{1,80}$")
+HOSTNAME_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 
 
 class BadRequest(ValueError):
@@ -26,6 +30,20 @@ class Event:
     proto: str | None
     dport: int | None
     hits: int
+
+
+@dataclass(frozen=True)
+class Metrics:
+    ts: datetime
+    cpu_pct: float | None
+    load: tuple[float, float, float] | None
+    mem_total: int
+    mem_used: int
+    swap_total: int
+    swap_used: int
+    disk_total: int
+    disk_used: int
+    disk_avail: int
 
 
 def _parse_ts(value: object) -> datetime:
@@ -97,6 +115,73 @@ def parse_batch(payload: object, *, now: datetime, retention_days: int,
         except ValueError:
             rejected += 1
     return events, rejected
+
+
+def _number(value: object, low: float, high: float, name: str) -> float:
+    # bool es subclase de int; NaN e infinito no pasan la comparación de rango.
+    if type(value) not in (int, float) or not low <= value <= high:
+        raise ValueError(name)
+    return float(value)
+
+
+def _bytes(item: dict, name: str, *, positive: bool = False) -> int:
+    value = item.get(name)
+    if type(value) is not int or not (1 if positive else 0) <= value <= MAX_BYTES:
+        raise ValueError(name)
+    return value
+
+
+def parse_metrics(item: object, *, now: datetime) -> Metrics:
+    """Estado del servidor que manda el agente en cada ejecución. Lanza ValueError si no sirve.
+
+    Cubre todas las restricciones CHECK de la tabla metrics: una fila inválida haría fallar
+    también la transacción de los eventos del mismo lote.
+    """
+    if not isinstance(item, dict):
+        raise ValueError("metrics")
+    ts = _parse_ts(item.get("ts"))
+    if abs(ts - now) > FUTURE_SKEW:
+        raise ValueError("ts fuera de rango")
+
+    cpu = item.get("cpu_pct")
+    cpu = None if cpu is None else _number(cpu, 0, 100, "cpu_pct")
+
+    load = item.get("load")
+    if load is not None:
+        if not isinstance(load, list) or len(load) != 3:
+            raise ValueError("load")
+        load = tuple(_number(v, 0, MAX_LOAD, "load") for v in load)
+
+    m = Metrics(ts, cpu, load,
+                _bytes(item, "mem_total", positive=True), _bytes(item, "mem_used"),
+                _bytes(item, "swap_total"), _bytes(item, "swap_used"),
+                _bytes(item, "disk_total", positive=True), _bytes(item, "disk_used"),
+                _bytes(item, "disk_avail"))
+    if (m.mem_used > m.mem_total or m.swap_used > m.swap_total
+            or m.disk_used > m.disk_total or m.disk_avail > m.disk_total):
+        raise ValueError("usado mayor que total")
+    return m
+
+
+def parse_host(item: object) -> dict[str, str | None]:
+    """Datos de la cabecera de la tarjeta del servidor. Un campo inválido queda en None."""
+    item = item if isinstance(item, dict) else {}
+
+    def text(key: str, pattern: re.Pattern) -> str | None:
+        value = item.get(key)
+        return value if isinstance(value, str) and pattern.match(value) else None
+
+    def ip(key: str, version: int) -> str | None:
+        value = item.get(key)
+        try:
+            addr = ipaddress.ip_address(value) if isinstance(value, str) and len(value) <= 45 else None
+        except ValueError:
+            return None
+        return addr.compressed if addr and addr.version == version and addr.is_global else None
+
+    return {"label": text("label", HOST_TEXT_RE), "service": text("service", HOST_TEXT_RE),
+            "hostname": text("hostname", HOSTNAME_RE), "os": text("os", HOST_TEXT_RE),
+            "kernel": text("kernel", HOST_TEXT_RE), "ipv4": ip("ipv4", 4), "ipv6": ip("ipv6", 6)}
 
 
 def mask_network(ip: str) -> str:
