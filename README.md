@@ -203,8 +203,7 @@ propias IPs y la red de la VPN. La primera ejecución empieza desde el final de 
 - **RAM**: usada = total − disponible (la caché que Linux libera no cuenta), y swap.
 - **Disco `/`**: tamaño, usado y libre, con el mismo criterio que `df`.
 - **Cabecera**: hostname, sistema (`/etc/os-release`), kernel, IPv4/IPv6 públicas de salida y
-  `SHIPPER_HOST_LABEL` / `SHIPPER_HOST_SERVICE` de `shipper.env`. El agente no puede leer la
-  versión de Mox: actualiza `SHIPPER_HOST_SERVICE` a mano cuando actualices Mox.
+  `SHIPPER_HOST_LABEL` / `SHIPPER_HOST_SERVICE` de `shipper.env`.
 
 `SHIPPER_METRICS=0` lo desactiva. La API guarda una fila por ejecución, con la misma retención
 que los eventos; el dashboard muestra la serie completa en 24 h y medias por hora en 7 y 30 días.
