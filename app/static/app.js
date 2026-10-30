@@ -13,6 +13,8 @@
   // Estado del servidor, en %: [ámbar, rojo]. Los picos cortos de CPU son normales; la RAM
   // no cuenta la caché y el disco avisa con margen para actuar.
   const LIMITS = { cpu: [75, 90], mem: [80, 90], disk: [80, 90] };
+  // Métricas cuya minigráfica se sincroniza con las de ataques y salen en el tooltip.
+  const TIP_METRICS = { cpu: "CPU media", mem: "RAM media" };
   const LEVEL_TEXT = { ok: "Normal", warn: "Elevado", crit: "Crítico", none: "Sin datos" };
   const RANGE_TEXT = { "24h": "hace 24 h", "7d": "hace 7 días", "30d": "hace 30 días" };
   const nf = new Intl.NumberFormat("es-CO");
@@ -104,10 +106,10 @@
   };
   const hideTip = () => { tip.hidden = true; };
 
-  // Las gráficas de ataques y la de CPU comparten periodos: el que está bajo el puntero se
-  // resalta en todas, y el tooltip resume ese periodo.
+  // Las gráficas de ataques y las de CPU y RAM comparten periodos: el que está bajo el puntero
+  // se resalta en todas, y el tooltip resume ese periodo.
   const bands = {};
-  let cpuSpark = null;
+  let sparks = {};
   const bucketSpan = (i) => {
     const b = data.timeline.buckets;
     return [Date.parse(b[i].t), i + 1 < b.length ? Date.parse(b[i + 1].t) : Date.parse(data.generated_at)];
@@ -120,23 +122,25 @@
   };
   const highlight = (i) => {
     for (const list of Object.values(bands)) list.forEach((band, j) => band.classList.toggle("on", j === i));
-    cpuSpark?.band(i >= 0 && data.timeline.buckets[i] ? bucketSpan(i) : null);
+    const span = i >= 0 && data.timeline.buckets[i] ? bucketSpan(i) : null;
+    for (const spark of Object.values(sparks)) spark.band(span);
   };
   const clearHover = () => { highlight(-1); hideTip(); };
-  const cpuIn = (i) => {
+  const avgIn = (i, key) => {
     const [from, to] = bucketSpan(i);
     const values = (data.server?.series.points || [])
-      .filter((p) => p.cpu != null && Date.parse(p.t) >= from && Date.parse(p.t) < to).map((p) => p.cpu);
+      .filter((p) => p[key] != null && Date.parse(p.t) >= from && Date.parse(p.t) < to).map((p) => p[key]);
     return values.length ? values.reduce((a, v) => a + v, 0) / values.length : null;
   };
   const bucketTip = (i) => {
     const b = data.timeline.buckets[i];
     const lines = SERIES.map((s) => el("span", { class: "line" },
       el("span", { class: "key", "data-series": s.n }), `${nf.format(b[s.key])} ${s.unit}`));
-    const cpu = cpuIn(i);
-    if (cpu != null) {
+    for (const [key, name] of Object.entries(TIP_METRICS)) {
+      const avg = avgIn(i, key);
+      if (avg == null) continue;
       lines.push(el("span", { class: "line" },
-        el("span", { class: "key", "data-series": "cpu" }), `CPU media ${pct(cpu)} %`));
+        el("span", { class: "key", "data-series": key }), `${name} ${pct(avg)} %`));
     }
     return [el("strong", {}, fmtBucket(b.t)), ...lines];
   };
@@ -284,7 +288,7 @@
                    ["Servicio", host.service], ["IPv4", host.ipv4], ["IPv6", host.ipv6]];
     $("server-facts").replaceChildren(...facts.filter(([, v]) => v).map(([k, v]) =>
       el("div", {}, el("dt", {}, k), el("dd", {}, v))));
-    cpuSpark = null;
+    sparks = {};
 
     const pill = $("server-pill");
     const setPill = (lvl, text) => { pill.dataset.level = lvl; $("server-pill-text").textContent = text; };
@@ -336,16 +340,17 @@
       g.querySelector(".meter-fill").style.width = `${value == null ? 0 : Math.min(100, value)}%`;
       g.querySelector(".spark-from").textContent = RANGE_TEXT[d.range] || "";
       g.querySelectorAll(".gauge-detail").forEach((p, j) => { p.textContent = lines[metric][j] || ""; });
+      const synced = metric in TIP_METRICS && buckets.length > 0;
       const chart = sparkChart(g.querySelector(".spark"), s.series.points, metric, {
         ...span, limit: LIMITS[metric][0],
-        onHover: metric === "cpu" && buckets.length ? (evt, t) => {
+        onHover: synced ? (evt, t) => {
           const i = bucketAt(t);
           if (i < 0) { clearHover(); return; }
           highlight(i);
           showTip(evt, bucketTip(i));
         } : null,
       });
-      if (metric === "cpu") cpuSpark = chart;
+      if (synced && chart) sparks[metric] = chart;
     }
   }
 

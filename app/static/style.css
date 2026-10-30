@@ -16,8 +16,10 @@
   --accent:        #3987e5;
   --good:          #0ca30c;
   --good-text:     #2fbf2f;
-  /* Estado del servidor: normal / elevado / crítico */
+  /* Estado del servidor: color de CPU / RAM / disco, y elevado / crítico */
   --metric:        #34c6a8;
+  --metric-mem:    #cac45a;
+  --metric-disk:   #b39df0;
   --warn:          #e3a72f;
   --crit:          #f0625a;
   --focus:         #86b6ef;
@@ -43,6 +45,8 @@
     --focus:         #256abf;
     --good-text:     #087a08;
     --metric:        #0b7d69;
+    --metric-mem:    #8a8f00;
+    --metric-disk:   #8a62d0;
     --warn:          #976400;
     --crit:          #c42b1c;
   }
@@ -111,12 +115,16 @@ a { color: var(--accent); }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
   padding: 16px; min-width: 0; display: flex; flex-direction: column;
 }
+/* Antes que warn/crit: con la misma especificidad, el ámbar y el rojo ganan por orden. */
+.gauge[data-metric="mem"] { --c: var(--metric-mem); }
+.gauge[data-metric="disk"] { --c: var(--metric-disk); }
 .gauge[data-level="warn"] { --c: var(--warn); }
 .gauge[data-level="crit"] { --c: var(--crit); }
 .gauge-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .gauge-head h3 { margin: 0; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .gauge-level { font-size: 12px; font-weight: 600; color: var(--c); }
+.gauge[data-level="ok"] .gauge-level { color: var(--good-text); }
 .gauge[data-level="none"] .gauge-level { color: var(--text-muted); }
 .gauge-value { margin: 10px 0 10px; line-height: 1; }
 .gauge-value .num { font-size: 34px; font-weight: 650; letter-spacing: -0.02em; }
@@ -159,6 +167,7 @@ main { padding-top: 20px; padding-bottom: 8px; display: grid; gap: 16px; }
 .key[data-series="1"] { background: var(--series-1); }
 .key[data-series="2"] { background: var(--series-2); }
 .key[data-series="cpu"] { background: var(--metric); }
+.key[data-series="mem"] { background: var(--metric-mem); }
 
 /* Gráfico de barras (SVG generado por app.js) */
 .chart { position: relative; height: 200px; }
